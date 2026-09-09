@@ -26,7 +26,9 @@ const state = {
   q:"", sort:"name", sortDir:1,
   series:{},                         // series key -> included? (empty = all)
   site:{}, tier:{},                  // homesite / tier chips, same convention
-  showShells:false, showUnpriced:false,
+  showShells:false,
+  showAwaiting:true,                 // roster plans with no cost yet — shown by default
+  showIncomplete:false,              // rows whose figures look unreliable
   rng:{},                            // key -> {min,max,lo,hi} live slider state
   open:{}                            // plan_no -> drill-down expanded?
 };
@@ -211,7 +213,7 @@ function planList(){
   });
   const out=[];
   by.forEach(e=>{
-    const priced=e.rows.filter(r=>costOf(r)!=null && cpsfOf(r)!=null && !(r.incomplete && !state.showUnpriced));
+    const priced=e.rows.filter(r=>costOf(r)!=null && cpsfOf(r)!=null && !(r.incomplete && !state.showIncomplete));
     const cp=priced.map(cpsfOf), ex=priced.map(costOf);
     e.n=e.rows.length; e.nComm=e.comms.size; e.nPriced=priced.length;
     e.cpsf = cp.length ? cp.reduce((a,b)=>a+b,0)/cp.length : null;
@@ -228,6 +230,11 @@ function planList(){
 }
 
 /* ---------------- FILTERING ---------------- */
+/* The population the sliders describe: everything the kind toggles admit,
+   before any facet or slider narrowing. */
+function inScope(all){
+  return all.filter(p=>(state.showShells||p.kind!=="shell") && (state.showAwaiting||!p.awaiting));
+}
 function rangeDefs(all){
   const f=(k,get)=>{ const v=all.map(get).filter(x=>x!=null); return v.length?{min:Math.min(...v),max:Math.max(...v)}:{min:0,max:0}; };
   return { cpsf:f("cpsf",p=>p.cpsf), ext:f("ext",p=>p.ext), sqft:f("sqft",p=>p.sqft) };
@@ -256,15 +263,18 @@ function rngActive(k){ const r=state.rng[k]; return !!(r && r.touched && (r.lo>r
 function chipsOn(o){ return Object.values(o).some(Boolean); }
 function seriesFilterOn(){ return chipsOn(state.series); }
 
-function filtered(all){
+/* `except` names one facet to ignore, so a chip can be labelled with the number
+   of plans it would actually reveal — every other filter still applied. Without
+   that, a chip advertises plans the list then refuses to show. */
+function filtered(all, except){
   const q=lc(state.q).trim();
   const on=seriesFilterOn(), onSite=chipsOn(state.site), onTier=chipsOn(state.tier);
   return all.filter(p=>{
     if(p.kind==="shell" && !state.showShells) return false;
-    if(!state.showUnpriced && p.cpsf==null) return false;
-    if(on && !state.series[p.series]) return false;
-    if(onSite && !state.site[p.site||"—"]) return false;
-    if(onTier && !state.tier[p.tier||"—"]) return false;
+    if(p.awaiting && !state.showAwaiting) return false;
+    if(on    && except!=="series" && !state.series[p.series]) return false;
+    if(onSite&& except!=="site"   && !state.site[p.site||"—"]) return false;
+    if(onTier&& except!=="tier"   && !state.tier[p.tier||"—"]) return false;
     for(const k of ["cpsf","ext","sqft"]){
       const r=state.rng[k]; if(!r) continue;
       const v = k==="cpsf"?p.cpsf : k==="ext"?p.ext : p.sqft;
@@ -296,7 +306,7 @@ function sortPlans(list){
 /* ---------------- RENDER ---------------- */
 function render(){
   const all=planList();
-  syncRanges(all.filter(p=>state.showShells || p.kind!=="shell"));
+  syncRanges(inScope(all));
   const list=sortPlans(filtered(all));
   $("cPlans").textContent = all.filter(p=>p.kind!=="shell").length;
   $("cSeries").textContent = new Set(all.map(p=>p.series)).size;
@@ -332,19 +342,21 @@ function renderPlans(a, all, list){
       <span class="hint" id="resCount"></span>
       <span class="spacer"></span>
       <label class="hint chk"><input type="checkbox" id="chkShell" ${state.showShells?"checked":""}> Building shells</label>
-      <label class="hint chk"><input type="checkbox" id="chkUnpriced" ${state.showUnpriced?"checked":""}> Unpriced / incomplete</label>
+      <label class="hint chk" title="Plans on the roster that this dataset hasn't priced"><input type="checkbox" id="chkAwait" ${state.showAwaiting?"checked":""}> Awaiting pricing</label>
+      <label class="hint chk" title="Rows whose figures look unreliable"><input type="checkbox" id="chkIncomplete" ${state.showIncomplete?"checked":""}> Unreliable figures</label>
       <button class="btn mini ghost" id="btnXlsx">&#8681; Export</button>
     </div>
     <div class="plansplit">
       <aside class="filters" id="filters">
         <div class="fgroup">
           <div class="fgh">Series</div>
-          <div class="serchips">${seriesKeys.map(k=>{
-            const n=all.filter(p=>p.series===k && (state.showShells||p.kind!=="shell")).length;
+          <div class="serchips">${(()=>{ const pool=filtered(all,"series");
+            return seriesKeys.map(k=>{
+            const n=pool.filter(p=>p.series===k).length;
             if(!n) return "";
             return `<button class="serchip${state.series[k]?" on":""}" data-chip="series" data-val="${esc(k)}"
               title="${esc((SERIES[k]&&SERIES[k].blurb)||"")}">${esc(seriesLabel(k))}<span>${n}</span></button>`;
-          }).join("")}</div>
+          }).join(""); })()}</div>
         </div>
         ${chipGroup("Homesite","site",all,p=>p.site)}
         ${chipGroup("Tier","tier",all,p=>p.tier)}
@@ -374,10 +386,11 @@ function renderPlans(a, all, list){
 
   $("q").addEventListener("input",e=>{ state.q=e.target.value; repaint(); });
   $("chkShell").onchange=e=>{ state.showShells=e.target.checked; state.rng={}; render(); };
-  $("chkUnpriced").onchange=e=>{ state.showUnpriced=e.target.checked; render(); };
+  $("chkAwait").onchange=e=>{ state.showAwaiting=e.target.checked; render(); };
+  $("chkIncomplete").onchange=e=>{ state.showIncomplete=e.target.checked; state.rng={}; render(); };
   $("btnXlsx").onclick=()=>exportPlans(sortPlans(filtered(planList())));
   $("btnReset").onclick=()=>{ state.q=""; state.series={}; state.site={}; state.tier={};
-    state.rng={}; state.showShells=false; state.showUnpriced=false; render(); };
+    state.rng={}; state.showShells=false; state.showAwaiting=true; state.showIncomplete=false; render(); };
   a.querySelectorAll("[data-chip]").forEach(b=>b.onclick=()=>{
     const bag=state[b.dataset.chip], k=b.dataset.val;
     bag[k]=!bag[k]; if(!bag[k]) delete bag[k]; render(); });
@@ -399,9 +412,22 @@ function renderPlans(a, all, list){
   drawList(list);
 
   function drawList(rows){
-    const host=$("planList"); const total=planList().filter(p=>state.showShells||p.kind!=="shell").length;
+    const host=$("planList"); const total=inScope(planList()).length;
     $("resCount").textContent=`${rows.length} of ${total} plans`;
-    if(!rows.length){ host.innerHTML=`<div class="empty">No plans match these filters.</div>`; return; }
+    if(!rows.length){
+      // "nothing matched" and "everything that matched is hidden by a checkbox"
+      // are different problems; only the second one has a one-click fix.
+      const wasA=state.showAwaiting, wasS=state.showShells;
+      state.showAwaiting=true; state.showShells=true;
+      const relaxed=filtered(planList()).length;
+      state.showAwaiting=wasA; state.showShells=wasS;
+      host.innerHTML=`<div class="empty" style="padding:26px;text-align:center">
+        <div>No plans match these filters.</div>
+        ${relaxed>0?`<div class="tiny" style="margin-top:8px">${relaxed} plan${relaxed===1?"":"s"} would match if hidden groups were shown.</div>
+          <button class="btn mini ghost" id="btnRelax" style="margin-top:10px">Show awaiting pricing and building shells</button>`:""}
+      </div>`;
+      if($("btnRelax")) $("btnRelax").onclick=()=>{ state.showAwaiting=true; state.showShells=true; state.rng={}; render(); };
+      return; }
     // group by series, in configured order
     const groups=new Map();
     rows.forEach(p=>{ if(!groups.has(p.series)) groups.set(p.series,[]); groups.get(p.series).push(p); });
@@ -434,7 +460,7 @@ function renderPlans(a, all, list){
    nothing when the attribute has fewer than two distinct values — a filter
    with one option is just clutter. */
 function chipGroup(title, key, all, get){
-  const pool=all.filter(p=>state.showShells||p.kind!=="shell");
+  const pool=filtered(all, key);
   const counts=new Map();
   pool.forEach(p=>{ const v=get(p)||"—"; counts.set(v,(counts.get(v)||0)+1); });
   if(counts.size<2) return "";
@@ -510,8 +536,10 @@ function renderSeries(a, all){
   const keys=[...new Set(all.map(p=>p.series))].sort((x,y)=>{
     const i=SERIES_ORDER.indexOf(x), j=SERIES_ORDER.indexOf(y);
     return (i<0?99:i)-(j<0?99:j) || String(x).localeCompare(y); });
+  const shown=filtered(all,"series");
   a.innerHTML=`<div class="sercards">${keys.map(k=>{
-    const g=all.filter(p=>p.series===k);
+    const g=shown.filter(p=>p.series===k);
+    if(!g.length) return "";
     const cp=g.map(p=>p.cpsf).filter(v=>v!=null), sq=g.map(p=>p.sqft).filter(v=>v!=null);
     const ex=g.map(p=>p.ext).filter(v=>v!=null);
     const avg=v=>v.length?v.reduce((a,b)=>a+b,0)/v.length:null;
