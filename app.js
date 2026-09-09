@@ -8,6 +8,26 @@ const CFG = window.APP_CONFIG;
 const SERIES = window.PDB_SERIES || {};
 const SERIES_ORDER = window.PDB_SERIES_ORDER || [];
 const SERIES_LABEL = window.PDB_SERIES_LABEL || {};
+/* Chip facets and sliders are declared once. Everything that filters, counts,
+   labels or clears them walks these lists, so adding a dimension is one entry
+   rather than a branch in six places. */
+const FACETS = [
+  { key:"site",   label:"Homesite", get:p=>p.site },
+  { key:"tier",   label:"Tier",     get:p=>p.tier,   fmt:v=>"Tier "+v },
+  { key:"beds",   label:"Beds",     get:p=>p.beds,   fmt:v=>v+" bed" },
+  { key:"baths",  label:"Baths",    get:p=>p.baths,  fmt:v=>v+" bath" },
+  { key:"sty",    label:"Stories",  get:p=>p.sty,    fmt:v=>v+" level"+(v==="1"?"":"s") },
+  { key:"status", label:"Status",   get:p=>p.status, fmt:v=>(STATUS[v]||v) }
+];
+/* Plan Master status codes, spelled out. Unknown codes fall through as-is. */
+const STATUS = { ACT:"Active", COM:"Coming", DFW:"Deferred", DSL:"Discontinued sale",
+                 SHL:"Shell", DIS:"Discontinued", TMP:"Temporary" };
+const SLIDERS = [
+  { key:"cpsf",  label:"Cost per sq ft",  step:0.5,  get:p=>p.cpsf,  fmt:v=>money2(v) },
+  { key:"ext",   label:"Extended cost",   step:500,  get:p=>p.ext,   fmt:v=>money(v) },
+  { key:"price", label:"Sales price",     step:5000, get:p=>p.price, fmt:v=>money(v) },
+  { key:"sqft",  label:"Square feet",     step:25,   get:p=>p.sqft,  fmt:v=>sqftF(v)+" sf" }
+];
 const DEMO = !CFG.SUPABASE_URL || CFG.SUPABASE_URL.startsWith("YOUR_");
 let sb = null;
 if (!DEMO && window.supabase) sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, {
@@ -25,7 +45,9 @@ const state = {
   basis:"tax",                       // "tax" = with tax, "net" = untaxed
   q:"", sort:"name", sortDir:1,
   series:{},                         // series key -> included? (empty = all)
-  site:{}, tier:{},                  // homesite / tier chips, same convention
+  site:{}, tier:{}, beds:{}, baths:{}, sty:{}, status:{},   // chip facets, see FACETS
+  options:[],                        // per-plan options (small, loaded up front)
+  cc:{}, ccBusy:{},                  // cost codes per plan — fetched on demand
   showShells:false,
   showAwaiting:true,                 // roster plans with no cost yet — shown by default
   showIncomplete:false,              // rows whose figures look unreliable
@@ -39,6 +61,7 @@ const num = v => (typeof v==="number" && isFinite(v)) ? v : (v==null||v===""?nul
 const money = v => v==null?"—":"$"+Math.round(v).toLocaleString();
 const money2= v => v==null?"—":"$"+v.toFixed(2);
 const sqftF = v => v==null?"—":Math.round(v).toLocaleString();
+const pctF = v => v==null?"—":(v*100).toFixed(1)+"%";
 
 /* ---------------- modal dialogs (shared pattern with the other apps) ------- */
 function openModal({title, body, buttons}){
@@ -150,8 +173,36 @@ async function loadAll(){
 }
 /* Supabase caps a select at 1000 rows by default; page through so a year of
    datasets doesn't silently truncate. */
+/* Cost codes are tens of thousands of rows, so they are never loaded up front —
+   only for a plan the user actually opens, and cached per plan. */
+async function loadCostCodes(plan){
+  if(state.cc[plan] || state.ccBusy[plan]) return;
+  if(DEMO||!sb||!state.dataset){ state.cc[plan]=[]; return; }
+  state.ccBusy[plan]=true;
+  try{
+    const { data,error } = await sb.from("pdb_cost_codes").select("*")
+      .eq("division",CFG.DIVISION.key).eq("dataset",state.dataset).eq("plan_no",plan);
+    if(error) throw error;
+    state.cc[plan]=data||[];
+  }catch(e){ console.error(e); state.cc[plan]=[]; }
+  finally{ state.ccBusy[plan]=false; }
+}
+async function loadOptions(){
+  state.options=[];
+  if(DEMO||!sb||!state.dataset) return;
+  try{
+    const PAGE=1000;
+    for(let from=0;;from+=PAGE){
+      const { data,error } = await sb.from("pdb_plan_options").select("*")
+        .eq("division",CFG.DIVISION.key).eq("dataset",state.dataset).range(from,from+PAGE-1);
+      if(error) throw error;
+      state.options=state.options.concat(data||[]);
+      if(!data || data.length<PAGE) break;
+    }
+  }catch(e){ console.error(e); state.options=[]; }
+}
 async function loadCosts(){
-  state.rows=[];
+  state.rows=[]; state.cc={};
   if(DEMO||!sb||!state.dataset) return;
   try{
     const PAGE=1000;
@@ -164,6 +215,7 @@ async function loadCosts(){
       if(!data || data.length<PAGE) break;
     }
   }catch(e){ console.error(e); state.rows=[]; }
+  await loadOptions();
   const sel=$("dsPick");
   if(state.datasets.length>1){
     sel.classList.remove("hidden");
@@ -222,6 +274,17 @@ function planList(){
     e.ext  = ex.length ? ex.reduce((a,b)=>a+b,0)/ex.length : null;
     e.extLo= ex.length ? Math.min(...ex) : null;
     e.extHi= ex.length ? Math.max(...ex) : null;
+    // Sales price comes from the same rows as cost, so margin is like-for-like.
+    // It follows the tax toggle: margin against taxed cost is the stricter view.
+    const pr=e.rows.map(r=>num(r.base_price)).filter(v=>v&&v>0);
+    e.price  = pr.length ? pr.reduce((a,b)=>a+b,0)/pr.length : null;
+    e.priceLo= pr.length ? Math.min(...pr) : null;
+    e.priceHi= pr.length ? Math.max(...pr) : null;
+    e.gm     = (e.price!=null && e.ext!=null) ? e.price-e.ext : null;
+    e.gmPct  = (e.gm!=null && e.price) ? e.gm/e.price : null;
+    const st=new Map();
+    e.rows.forEach(r=>{ if(r.status) st.set(r.status,(st.get(r.status)||0)+1); });
+    e.status = st.size ? [...st.entries()].sort((a,b)=>b[1]-a[1])[0][0] : "";
     e.incomplete = e.rows.some(r=>r.incomplete);
     e.awaiting = e.rows.length===0;      // on the roster, not in this dataset
     out.push(e);
@@ -236,8 +299,10 @@ function inScope(all){
   return all.filter(p=>(state.showShells||p.kind!=="shell") && (state.showAwaiting||!p.awaiting));
 }
 function rangeDefs(all){
-  const f=(k,get)=>{ const v=all.map(get).filter(x=>x!=null); return v.length?{min:Math.min(...v),max:Math.max(...v)}:{min:0,max:0}; };
-  return { cpsf:f("cpsf",p=>p.cpsf), ext:f("ext",p=>p.ext), sqft:f("sqft",p=>p.sqft) };
+  const out={};
+  SLIDERS.forEach(s=>{ const v=all.map(s.get).filter(x=>x!=null);
+    out[s.key]=v.length?{min:Math.min(...v),max:Math.max(...v)}:{min:0,max:0}; });
+  return out;
 }
 /* Slider bounds come from the data and shift whenever the basis, dataset or a
    checkbox changes what's in scope. `touched` records whether the USER moved a
@@ -246,8 +311,7 @@ function rangeDefs(all){
    untouched slider silently starts excluding rows. */
 function syncRanges(all){
   const d=rangeDefs(all);
-  ["cpsf","ext","sqft"].forEach(k=>{
-    const step = k==="cpsf" ? 0.5 : (k==="ext" ? 500 : 25);
+  SLIDERS.forEach(({key:k,step})=>{
     const min=Math.floor(d[k].min/step)*step, max=Math.ceil(d[k].max/step)*step;
     const cur=state.rng[k];
     if(!cur){ state.rng[k]={min,max,lo:min,hi:max,step,touched:false}; return; }
@@ -268,17 +332,19 @@ function seriesFilterOn(){ return chipsOn(state.series); }
    that, a chip advertises plans the list then refuses to show. */
 function filtered(all, except){
   const q=lc(state.q).trim();
-  const on=seriesFilterOn(), onSite=chipsOn(state.site), onTier=chipsOn(state.tier);
+  const on=seriesFilterOn();
   return all.filter(p=>{
     if(p.kind==="shell" && !state.showShells) return false;
     if(p.awaiting && !state.showAwaiting) return false;
-    if(on    && except!=="series" && !state.series[p.series]) return false;
-    if(onSite&& except!=="site"   && !state.site[p.site||"—"]) return false;
-    if(onTier&& except!=="tier"   && !state.tier[p.tier||"—"]) return false;
-    for(const k of ["cpsf","ext","sqft"]){
-      const r=state.rng[k]; if(!r) continue;
-      const v = k==="cpsf"?p.cpsf : k==="ext"?p.ext : p.sqft;
-      if(v==null){ if(rngActive(k)) return false; continue; }
+    if(on && except!=="series" && !state.series[p.series]) return false;
+    for(const f of FACETS){
+      if(except===f.key || !chipsOn(state[f.key])) continue;
+      if(!state[f.key][f.get(p)||"—"]) return false;
+    }
+    for(const s of SLIDERS){
+      const r=state.rng[s.key]; if(!r) continue;
+      const v=s.get(p);
+      if(v==null){ if(rngActive(s.key)) return false; continue; }
       if(v<r.lo-1e-9 || v>r.hi+1e-9) return false;
     }
     if(q){
@@ -292,7 +358,8 @@ function filtered(all, except){
 function sortPlans(list){
   const d=state.sortDir;
   const key={ name:p=>lc(p.name||p.plan), plan:p=>p.plan, cpsf:p=>p.cpsf, ext:p=>p.ext,
-              sqft:p=>p.sqft, comms:p=>p.nComm }[state.sort] || (p=>lc(p.name||p.plan));
+              price:p=>p.price, gm:p=>p.gmPct, sqft:p=>p.sqft, comms:p=>p.nComm
+            }[state.sort] || (p=>lc(p.name||p.plan));
   return list.slice().sort((a,b)=>{
     const x=key(a), y=key(b);
     if(x==null && y==null) return 0;
@@ -308,9 +375,9 @@ function render(){
   const all=planList();
   syncRanges(inScope(all));
   const list=sortPlans(filtered(all));
-  $("cPlans").textContent = all.filter(p=>p.kind!=="shell").length;
-  $("cSeries").textContent = new Set(all.map(p=>p.series)).size;
-  $("cComms").textContent = new Set(state.rows.map(r=>r.comm_num).filter(Boolean)).size;
+  $("cPlans").textContent  = filtered(all).length;
+  $("cSeries").textContent = new Set(filtered(all,"series").map(p=>p.series)).size;
+  $("cComms").textContent  = new Set(state.rows.map(r=>r.comm_num).filter(Boolean)).size;
   $("footMeta").textContent = state.rows.length
     ? `${dsLabel(state.dataset)} · ${state.rows.length.toLocaleString()} rows · ${state.basis==="tax"?"with tax":"untaxed"}`
     : "";
@@ -358,26 +425,18 @@ function renderPlans(a, all, list){
               title="${esc((SERIES[k]&&SERIES[k].blurb)||"")}">${esc(seriesLabel(k))}<span>${n}</span></button>`;
           }).join(""); })()}</div>
         </div>
-        ${chipGroup("Homesite","site",all,p=>p.site)}
-        ${chipGroup("Tier","tier",all,p=>p.tier)}
-        <div class="fgroup">
-          <div class="fgh">Cost per sq ft<span class="fgh-note">${state.basis==="tax"?"with tax":"untaxed"}</span></div>
-          <div id="rsCpsf"></div>
-        </div>
-        <div class="fgroup">
-          <div class="fgh">Extended cost<span class="fgh-note">${state.basis==="tax"?"with tax":"untaxed"}</span></div>
-          <div id="rsExt"></div>
-        </div>
-        <div class="fgroup">
-          <div class="fgh">Square feet</div>
-          <div id="rsSqft"></div>
-        </div>
+        ${FACETS.map(f=>chipGroup(f,all)).join("")}
+        ${SLIDERS.map(sl=>`<div class="fgroup">
+          <div class="fgh">${esc(sl.label)}${(sl.key==="cpsf"||sl.key==="ext")
+            ?`<span class="fgh-note">${state.basis==="tax"?"with tax":"untaxed"}</span>`:""}</div>
+          <div id="rs_${sl.key}"></div>
+        </div>`).join("")}
         <button class="btn mini ghost" id="btnReset" style="width:100%">Reset all filters</button>
       </aside>
       <div class="planmain">
         <div class="sortbar">
           <span class="hint">Sort</span>
-          ${[["name","Plan"],["cpsf","Cost / sq ft"],["ext","Extended cost"],["sqft","Sq ft"],["comms","Communities"]]
+          ${[["name","Plan"],["cpsf","Cost / sq ft"],["ext","Extended cost"],["price","Sales price"],["gm","Margin"],["sqft","Sq ft"],["comms","Communities"]]
             .map(([k,l])=>`<button class="sortb${state.sort===k?" on":""}" data-sort="${k}">${l}${state.sort===k?`<i>${state.sortDir>0?"▲":"▼"}</i>`:""}</button>`).join("")}
         </div>
         <div id="planList"></div>
@@ -389,8 +448,7 @@ function renderPlans(a, all, list){
   $("chkAwait").onchange=e=>{ state.showAwaiting=e.target.checked; render(); };
   $("chkIncomplete").onchange=e=>{ state.showIncomplete=e.target.checked; state.rng={}; render(); };
   $("btnXlsx").onclick=()=>exportPlans(sortPlans(filtered(planList())));
-  $("btnReset").onclick=()=>{ state.q=""; state.series={}; state.site={}; state.tier={};
-    state.rng={}; state.showShells=false; state.showAwaiting=true; state.showIncomplete=false; render(); };
+  $("btnReset").onclick=clearAllFilters;
   a.querySelectorAll("[data-chip]").forEach(b=>b.onclick=()=>{
     const bag=state[b.dataset.chip], k=b.dataset.val;
     bag[k]=!bag[k]; if(!bag[k]) delete bag[k]; render(); });
@@ -401,9 +459,7 @@ function renderPlans(a, all, list){
     render();
   });
 
-  rangeSlider("rsCpsf","cpsf",v=>money2(v));
-  rangeSlider("rsExt","ext",v=>money(v));
-  rangeSlider("rsSqft","sqft",v=>sqftF(v)+" sf");
+  SLIDERS.forEach(sl=>rangeSlider("rs_"+sl.key, sl.key, sl.fmt));
 
   // hand the list painter to the slider, which repaints only this region while
   // dragging (a full render() would rebuild the slider under the user's finger)
@@ -446,20 +502,33 @@ function renderPlans(a, all, list){
           <span class="hint sershow">${esc((SERIES[k]&&SERIES[k].blurb)||"")}</span>
         </div>
         <table class="pt">
-          <thead><tr><th class="c-plan">Plan</th><th class="c-sq">Sq ft</th>
+          <thead><tr><th class="c-plan">Plan</th><th class="c-sq">Sq ft</th><th class="c-bb">Bd / Ba</th>
             <th class="c-cp">Cost / sq ft</th><th class="c-ex">Extended cost</th>
-            <th class="c-cm">Communities</th><th class="c-ch"></th></tr></thead>
+            <th class="c-pr">Sales price</th><th class="c-gm">Margin</th>
+            <th class="c-cm">Comms</th><th class="c-ch"></th></tr></thead>
           <tbody>${g.map(planRowHTML).join("")}</tbody>
         </table></section>`;
     }).join("");
     host.querySelectorAll("[data-plan]").forEach(tr=>tr.onclick=()=>{
       const p=tr.dataset.plan; state.open[p]=!state.open[p]; drawList(rows); });
+    host.querySelectorAll("[data-cc]").forEach(b=>b.onclick=async ev=>{
+      ev.stopPropagation();                     // the row toggle would close the panel
+      const plan=b.dataset.cc;
+      // loadCostCodes flips ccBusy synchronously before its first await, so
+      // redrawing right after the call shows the loading state. Setting the
+      // flag here instead would trip the loader's own re-entry guard.
+      const pending=loadCostCodes(plan);
+      drawList(rows);
+      await pending;
+      drawList(rows);
+    });
   }
 }
 /* A chip row for any single-valued plan attribute (homesite, tier). Renders
    nothing when the attribute has fewer than two distinct values — a filter
    with one option is just clutter. */
-function chipGroup(title, key, all, get){
+function chipGroup(f, all){
+  const {key,label,get}=f;
   const pool=filtered(all, key);
   const counts=new Map();
   pool.forEach(p=>{ const v=get(p)||"—"; counts.set(v,(counts.get(v)||0)+1); });
@@ -470,10 +539,10 @@ function chipGroup(title, key, all, get){
     if(isFinite(na)&&isFinite(nb)&&na!==nb) return na-nb;
     return String(a).localeCompare(String(b));
   });
-  return `<div class="fgroup"><div class="fgh">${esc(title)}</div>
+  return `<div class="fgroup"><div class="fgh">${esc(label)}</div>
     <div class="serchips">${vals.map(v=>
       `<button class="serchip${state[key][v]?" on":""}" data-chip="${esc(key)}" data-val="${esc(v)}">${
-        esc(v==="—"?"Unlisted":(key==="tier"?"Tier "+v:v))}<span>${counts.get(v)}</span></button>`).join("")}</div></div>`;
+        esc(v==="—"?"Unlisted":(f.fmt?f.fmt(v):v))}<span>${counts.get(v)}</span></button>`).join("")}</div></div>`;
 }
 function planRowHTML(p){
   const rangeCp = (p.cpsfLo!=null && p.cpsfHi!=null && p.cpsfHi-p.cpsfLo>0.01)
@@ -488,25 +557,33 @@ function planRowHTML(p){
     p.pending?`<span class="pill" title="Plan number not yet final">plan # TBD</span>`:"",
     p.alias?`<span class="pill" title="Same home as plan ${esc(p.alias)}">= ${esc(p.alias)}</span>`:""
   ].filter(Boolean).join(" ");
+  const bb=[p.beds,p.baths].filter(Boolean).join(" / ")||"—";
+  const st=p.status?`<span class="pill st-${esc(lc(p.status))}" title="${esc(STATUS[p.status]||p.status)}">${esc(p.status)}</span>`:"";
+  const NCOL=9;
   if(p.awaiting){
     return `<tr class="prow await${open?" open":""}" data-plan="${esc(p.plan)}">
       <td class="c-plan"><span class="pno">${esc(p.plan)}</span>
         <span class="pnm">${esc(p.name||"—")}</span> ${tags}</td>
       <td class="c-sq">${sqftF(p.sqft)}</td>
-      <td class="c-cp await-t" colspan="3">awaiting pricing<span class="rng">${
+      <td class="c-bb">${esc(bb)}</td>
+      <td class="c-cp await-t" colspan="5">awaiting pricing<span class="rng">${
         esc([p.matrixComm&&("earmarked for "+p.matrixComm), p.permit&&("permit: "+p.permit)].filter(Boolean).join(" · "))}</span></td>
       <td class="c-ch"><span class="chev">${open?"▾":"▸"}</span></td>
-    </tr>` + (open?`<tr class="pdet"><td colspan="6">${planDetailHTML(p)}</td></tr>`:"");
+    </tr>` + (open?`<tr class="pdet"><td colspan="${NCOL}">${planDetailHTML(p)}</td></tr>`:"");
   }
   return `<tr class="prow${open?" open":""}" data-plan="${esc(p.plan)}">
       <td class="c-plan"><span class="pno">${esc(p.plan)}</span>
-        <span class="pnm">${esc(p.name||"—")}</span> ${tags}</td>
+        <span class="pnm">${esc(p.name||"—")}</span> ${st} ${tags}</td>
       <td class="c-sq">${sqftF(p.sqft)}</td>
+      <td class="c-bb">${esc(bb)}</td>
       <td class="c-cp"><b>${money2(p.cpsf)}</b>${rangeCp}</td>
       <td class="c-ex"><b>${money(p.ext)}</b>${rangeEx}</td>
+      <td class="c-pr">${money(p.price)}</td>
+      <td class="c-gm ${p.gmPct!=null&&p.gmPct<0.6?"gm-low":""}">${pctF(p.gmPct)}${
+        p.gm!=null?`<span class="rng">${money(p.gm)}</span>`:""}</td>
       <td class="c-cm">${p.nComm}</td>
       <td class="c-ch"><span class="chev">${open?"▾":"▸"}</span></td>
-    </tr>` + (open?`<tr class="pdet"><td colspan="6">${planDetailHTML(p)}</td></tr>`:"");
+    </tr>` + (open?`<tr class="pdet"><td colspan="${NCOL}">${planDetailHTML(p)}</td></tr>`:"");
 }
 function planDetailHTML(p){
   const rows=p.rows.slice().sort((a,b)=>String(a.community).localeCompare(b.community)||String(a.elev).localeCompare(b.elev));
@@ -520,15 +597,71 @@ function planDetailHTML(p){
   return `<div class="det">
     ${meta?`<div class="detmeta">${esc(meta)}</div>`:""}
     <table class="dt"><thead><tr><th>Community</th><th>JDE</th><th>Elev</th><th>Sq ft</th>
-      <th>Cost / sq ft</th><th>Extended cost</th><th>Status</th></tr></thead>
+      <th>Cost / sq ft</th><th>Extended cost</th><th>Sales price</th><th>Margin</th><th>Status</th></tr></thead>
       <tbody>${rows.map(r=>{
-        const cp=cpsfOf(r), ex=costOf(r);
+        const cp=cpsfOf(r), ex=costOf(r), pr=num(r.base_price);
+        const gm=(pr&&ex)?(pr-ex)/pr:null;
         return `<tr${r.incomplete?' class="warnrow"':""}>
           <td>${esc(r.community||"—")}</td><td class="mono">${esc(r.jde||"")}</td>
           <td>${esc(r.elev||"—")}</td><td>${sqftF(num(r.sqft))}</td>
-          <td>${money2(cp)}</td><td>${money(ex)}</td>
+          <td>${money2(cp)}</td><td>${money(ex)}</td><td>${money(pr)}</td><td>${pctF(gm)}</td>
           <td>${esc(r.status||"—")}${r.incomplete?` <span class="pill warn">incomplete</span>`:""}</td></tr>`;
-      }).join("")}</tbody></table></div>`;
+      }).join("")}</tbody></table>
+    ${optionsHTML(p)}
+    ${costCodeHTML(p)}
+    </div>`;
+}
+
+/* Options priced against this plan. '1BASE' is the base package, not an add, so
+   it is excluded from the list and shown as the baseline instead. Figures are
+   untaxed — that is how the source carries them. */
+function optionsHTML(p){
+  const mine=state.options.filter(o=>o.plan_no===p.plan);
+  if(!mine.length) return "";
+  const adds=mine.filter(o=>String(o.opt_code).toUpperCase()!=="1BASE");
+  if(!adds.length) return "";
+  const by=new Map();
+  adds.forEach(o=>{ const k=o.opt_code;
+    if(!by.has(k)) by.set(k,{code:k,name:o.opt_name||"",v:[],comms:new Set()});
+    const e=by.get(k); const a=num(o.amount); if(a!=null) e.v.push(a);
+    if(o.community) e.comms.add(o.community); });
+  const list=[...by.values()].map(e=>({...e,
+    avg:e.v.length?e.v.reduce((a,b)=>a+b,0)/e.v.length:null,
+    lo:e.v.length?Math.min(...e.v):null, hi:e.v.length?Math.max(...e.v):null }))
+    .sort((a,b)=>(b.avg||0)-(a.avg||0));
+  return `<div class="detsec"><div class="detsec-h">Options <span class="hint">${list.length} priced against this plan · untaxed</span></div>
+    <table class="dt"><thead><tr><th>Code</th><th>Option</th><th>Avg cost</th><th>Range</th><th>Communities</th></tr></thead>
+    <tbody>${list.map(e=>`<tr><td class="mono">${esc(e.code)}</td><td>${esc(e.name||"—")}</td>
+      <td>${money(e.avg)}</td><td>${e.lo!=null&&e.hi!=null&&e.hi-e.lo>1?esc(money(e.lo)+"–"+money(e.hi)):"—"}</td>
+      <td>${e.comms.size}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+/* Cost codes are fetched per plan on demand — there are far too many to hold
+   for every plan at once. Averaged across the communities and elevations that
+   priced this plan, biggest first. */
+function costCodeHTML(p){
+  const rows=state.cc[p.plan];
+  if(state.ccBusy[p.plan]) return `<div class="detsec"><div class="hint" style="padding:10px 0">Loading cost breakdown…</div></div>`;
+  if(!rows) return `<div class="detsec"><button class="btn mini ghost" data-cc="${esc(p.plan)}">Show cost breakdown by cost code</button></div>`;
+  if(!rows.length) return `<div class="detsec"><div class="hint" style="padding:10px 0">No cost-code detail for this plan in ${esc(dsLabel(state.dataset))}.</div></div>`;
+  const by=new Map();
+  rows.forEach(r=>{ const k=r.code;
+    if(!by.has(k)) by.set(k,{code:k,desc:r.description||"",v:[]});
+    const v=num(r.cpsf); if(v!=null) by.get(k).v.push(v); });
+  const list=[...by.values()].map(e=>({...e, avg:e.v.length?e.v.reduce((a,b)=>a+b,0)/e.v.length:0}))
+    .filter(e=>e.avg>0).sort((a,b)=>b.avg-a.avg);
+  const total=list.reduce((a,b)=>a+b.avg,0);
+  const top=list.slice(0,20), rest=list.length-top.length;
+  return `<div class="detsec"><div class="detsec-h">Cost breakdown
+      <span class="hint">${list.length} cost codes · ${money2(total)} / sq ft total · untaxed · includes options</span></div>
+    <table class="dt cct"><thead><tr><th>Code</th><th>Description</th><th>Cost / sq ft</th><th>Share</th></tr></thead>
+    <tbody>${top.map(e=>{
+      const share=total?e.avg/total:0;
+      return `<tr><td class="mono">${esc(e.code)}</td><td>${esc(e.desc||"—")}</td>
+        <td>${money2(e.avg)}</td>
+        <td class="ccbar"><span style="width:${(share*100).toFixed(1)}%"></span><i>${pctF(share)}</i></td></tr>`;
+    }).join("")}</tbody></table>
+    ${rest>0?`<div class="hint" style="padding:8px 0 0">+ ${rest} smaller cost codes</div>`:""}</div>`;
 }
 
 /* ---- series overview ---- */
@@ -537,7 +670,7 @@ function renderSeries(a, all){
     const i=SERIES_ORDER.indexOf(x), j=SERIES_ORDER.indexOf(y);
     return (i<0?99:i)-(j<0?99:j) || String(x).localeCompare(y); });
   const shown=filtered(all,"series");
-  a.innerHTML=`<div class="sercards">${keys.map(k=>{
+  a.innerHTML=`${filterNote(all.length, shown.length)}<div class="sercards">${keys.map(k=>{
     const g=shown.filter(p=>p.series===k);
     if(!g.length) return "";
     const cp=g.map(p=>p.cpsf).filter(v=>v!=null), sq=g.map(p=>p.sqft).filter(v=>v!=null);
@@ -554,8 +687,39 @@ function renderSeries(a, all){
         <div><span>${sq.length?sqftF(Math.min(...sq))+"–"+sqftF(Math.max(...sq)):"—"}</span>sq ft range</div>
       </div></button>`;
   }).join("")}</div>`;
+  wireFilterNote();
   a.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{
     state.series={}; state.series[b.dataset.go]=true; state.view="plans"; setTab(); render(); });
+}
+
+/* Filters live on the Plans tab, but they keep applying on the other tabs where
+   the controls aren't visible. Without this, clicking a community and then
+   opening By series looks like the series data vanished. */
+function anyFilterOn(){
+  return !!(lc(state.q).trim() || FACETS.some(f=>chipsOn(state[f.key])) ||
+            !state.showAwaiting || state.showShells || state.showIncomplete ||
+            SLIDERS.some(s=>rngActive(s.key)));
+}
+function clearAllFilters(){
+  state.q=""; state.series={}; state.rng={};
+  FACETS.forEach(f=>{ state[f.key]={}; });
+  state.showShells=false; state.showAwaiting=true; state.showIncomplete=false; render();
+}
+function filterNote(total, shownN){
+  if(!anyFilterOn()) return "";
+  const bits=[];
+  if(lc(state.q).trim()) bits.push(`matching “${esc(state.q.trim())}”`);
+  FACETS.forEach(f=>{ if(chipsOn(state[f.key]))
+    bits.push(lc(f.label)+" "+Object.keys(state[f.key]).map(esc).join(", ")); });
+  if(SLIDERS.some(s=>rngActive(s.key))) bits.push("a cost or size range");
+  if(!state.showAwaiting) bits.push("excluding awaiting pricing");
+  return `<div class="filternote">
+      <span>Showing <b>${shownN}</b> of ${total} plans${bits.length?" — "+bits.join(" · "):""}.</span>
+      <button class="btn mini ghost" id="btnClearFilters">Clear filters</button></div>`;
+}
+function wireFilterNote(){
+  const b=$("btnClearFilters"); if(!b) return;
+  b.onclick=clearAllFilters;
 }
 
 /* ---- communities overview ---- */
@@ -630,17 +794,30 @@ function exportPlans(list){
   const basis=state.basis==="tax"?"with tax":"untaxed";
   const head=["Series","Series source","Homesite","Tier","Plan #","Plan name","Sq ft","Beds","Baths","Levels","Footprint",
               `Avg cost/sq ft (${basis})`,`Min cost/sq ft`,`Max cost/sq ft`,
-              `Avg extended cost (${basis})`,`Min extended`,`Max extended`,"Communities","Kind","Status"];
+              `Avg extended cost (${basis})`,`Min extended`,`Max extended`,
+              "Avg sales price","Min price","Max price","Gross margin $","Gross margin %",
+              "Plan status","Communities","Kind","Availability"];
   const body=list.map(p=>[seriesLabel(p.series),p.origin,p.site,p.tier,p.plan,p.name,p.sqft,p.beds,p.baths,p.sty,p.footprint,
-    p.cpsf,p.cpsfLo,p.cpsfHi,p.ext,p.extLo,p.extHi,p.nComm,p.kind,p.awaiting?"awaiting pricing":""]);
+    p.cpsf,p.cpsfLo,p.cpsfHi,p.ext,p.extLo,p.extHi,
+    p.price,p.priceLo,p.priceHi,p.gm,p.gmPct,
+    STATUS[p.status]||p.status,p.nComm,p.kind,p.awaiting?"awaiting pricing":""]);
   const detHead=["Plan #","Plan name","Series","Community","JDE","Elev","Sq ft",
-                 `Cost/sq ft (${basis})`,`Extended cost (${basis})`,"Status","Incomplete"];
+                 `Cost/sq ft (${basis})`,`Extended cost (${basis})`,"Sales price","Margin %","Status","Incomplete"];
   const det=[];
-  list.forEach(p=>p.rows.forEach(r=>det.push([p.plan,p.name,seriesLabel(p.series),r.community,r.jde,r.elev,
-    num(r.sqft),cpsfOf(r),costOf(r),r.status,r.incomplete?"yes":""])));
+  list.forEach(p=>p.rows.forEach(r=>{
+    const pr=num(r.base_price), ex=costOf(r);
+    det.push([p.plan,p.name,seriesLabel(p.series),r.community,r.jde,r.elev,
+      num(r.sqft),cpsfOf(r),ex,pr,(pr&&ex)?(pr-ex)/pr:null,r.status,r.incomplete?"yes":""]);}));
   const wb=XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head,...body]), "Plans");
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([detHead,...det]), "By community");
+  if(state.options.length){
+    const oh=["Plan #","Community","Elev","Option code","Option","Amount (untaxed)"];
+    const keep=new Set(list.map(p=>p.plan));
+    const od=state.options.filter(o=>keep.has(o.plan_no) && String(o.opt_code).toUpperCase()!=="1BASE")
+      .map(o=>[o.plan_no,o.community,o.elev,o.opt_code,o.opt_name,num(o.amount)]);
+    if(od.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([oh,...od]), "Options");
+  }
   XLSX.writeFile(wb, `Plan-DB_${state.dataset||"export"}_${state.basis}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 

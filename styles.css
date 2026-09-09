@@ -406,3 +406,30 @@ textarea.ed-in{min-height:90px;resize:vertical}
 .await-t{text-align:right;color:var(--mute);font-style:italic;white-space:nowrap}
 .await-t .rng{font-style:normal}
 .pill.inf{background:var(--editbg);border-color:#c3aeea;color:var(--edit)}
+
+/* active-filter banner on tabs that have no filter controls of their own */
+.filternote{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;padding:9px 13px;
+  background:var(--amber);border:1px solid var(--amberline);border-radius:var(--radius);font-size:13px;color:#7a5b00}
+[data-theme="dark"] .filternote{color:#e8c86a}
+.filternote>span{flex:1;min-width:200px}
+
+/* new plan columns */
+.pt .c-bb,.pt .c-pr,.pt .c-gm{text-align:right;white-space:nowrap}
+.pt th.c-bb,.pt th.c-pr,.pt th.c-gm{text-align:right}
+.c-gm.gm-low{color:var(--red)}
+.pill.st-act{background:var(--greenbg);border-color:#a8d5bd;color:var(--green)}
+.pill.st-dfw,.pill.st-dis,.pill.st-dsl{background:#eef1f5;border-color:#c9d2de;color:#6b7794}
+.pill.st-com{background:var(--blue-050);border-color:#b9d0ee;color:#245}
+
+/* drill-down sections: options and cost codes */
+.detsec{margin-top:14px}
+.detsec-h{font-size:11.5px;font-weight:700;color:var(--mute);text-transform:uppercase;letter-spacing:.04em;
+  margin-bottom:6px;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.detsec-h .hint{text-transform:none;letter-spacing:0;font-weight:600}
+.dt td:nth-child(n+3),.dt th:nth-child(n+3){text-align:right}
+.cct td:nth-child(2),.cct th:nth-child(2){text-align:left}
+.ccbar{position:relative;min-width:120px}
+.ccbar span{display:inline-block;height:9px;border-radius:3px;background:var(--blue-600);vertical-align:middle;min-width:2px}
+.ccbar i{font-style:normal;font-size:11px;color:var(--mute);margin-left:6px}
+@media(max-width:980px){ .pt .c-bb,.pt th.c-bb{display:none} }
+@media(max-width:760px){ .pt .c-pr,.pt th.c-pr,.pt .c-gm,.pt th.c-gm{display:none} }

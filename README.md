@@ -11,8 +11,11 @@ Run in the Supabase SQL editor, in order:
 
 1. `supabase_setup.sql` — tables, RLS, grants. Safe to re-run. Assumes the
    shared roles table and helper functions already exist.
-2. The seed file — plan roster and one month of cost data. Re-runnable;
-   replaces only that month.
+2. `seed_<month>.sql` — plan roster, that month's costs, and per-plan options.
+   Re-runnable; replaces only that month.
+3. `seed_<month>_costcodes_1..N.sql` — the cost-code breakdown, split into parts
+   because it is tens of thousands of rows. Run the parts in order; part 1
+   clears the month first.
 
 The app shows an empty state until step 2 runs.
 
@@ -25,6 +28,7 @@ The app shows an empty state until step 2 runs.
 | `config.js` | Connection settings, series display order |
 | `styles.css` | Shared design language plus this app's components |
 | `supabase_setup.sql` | Tables, RLS, grants |
+| `register_blueprint.sql` | Registers the app on the hub with the shared sign-in |
 
 ## Notes
 
@@ -38,6 +42,10 @@ The app shows an empty state until step 2 runs.
   `inferred` is a best guess and shows a tag in the app.
 - A plan's headline figure is the average across the communities that offer it;
   the smaller figure underneath is the range. Sliders filter on the average.
+- Cost codes are large, so the app never loads them up front — it fetches them
+  for one plan when someone opens that plan's breakdown, and caches per plan.
+- Margin is sales price minus extended cost, and follows the tax toggle, so the
+  default view is margin against taxed cost.
 - To load a new month: re-run the extraction over the new source folder, emit a
   seed with a new `dataset` value, and run it. Months coexist and the app gains
   a picker.
