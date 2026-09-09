@@ -1,0 +1,9 @@
+node_modules/
+*.local
+.DS_Store
+
+# Backend SQL — kept local, not published to the public Pages repo
+*.sql
+
+# Cost data must never be published. Seed files live in ../_scratch/plan-db-seed/
+seed_*.sql

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plan-DB — Orlando Division</title>
+<link rel="icon" href="logo.svg">
+<link rel="stylesheet" href="styles.css?v=1">
+</head>
+<body>
+
+<!-- ===================== AUTH ===================== -->
+<div id="auth">
+  <div class="auth-card">
+    <div class="brand"><img class="auth-logo" src="logo.svg" alt="Plan-DB">
+      <h1>Plan-DB</h1></div>
+    <p class="auth-sub">Sign in with your Lennar email and password to continue.</p>
+    <div id="stepSignin">
+      <label class="fld" for="email">Work email</label>
+      <input type="email" id="email" placeholder="you@lennar.com" autocomplete="email">
+      <label class="fld" for="password" style="margin-top:12px">Password</label>
+      <input type="password" id="password" placeholder="Your password" autocomplete="current-password">
+      <button class="btn" id="signinBtn" style="margin-top:14px">Sign in</button>
+    </div>
+    <div id="stepRecover" class="hidden">
+      <label class="fld" for="newPass">New password</label>
+      <input type="password" id="newPass" placeholder="At least 8 characters" autocomplete="new-password">
+      <label class="fld" for="newPass2" style="margin-top:12px">Confirm password</label>
+      <input type="password" id="newPass2" placeholder="Re-enter password" autocomplete="new-password">
+      <button class="btn" id="setPassBtn" style="margin-top:14px">Set password</button>
+    </div>
+    <div id="authMsg" class="msg"></div>
+    <p class="tiny">Access limited to Lennar associates. Need access or a password reset? Contact the portal admin.</p>
+  </div>
+</div>
+
+<!-- ===================== APP ===================== -->
+<div id="app" class="hidden">
+  <header class="topbar">
+    <div class="topbar-in">
+      <button class="home-logo" id="homeLogo" title="Home"><img src="logo.svg" alt="Plan-DB — home"></button>
+      <span class="title">Plan-DB <span class="sub">Orlando Division</span></span>
+      <div class="spacer"></div>
+      <div class="topbar-actions">
+        <span class="basis-toggle" id="basisToggle" title="Cost basis">
+          <button class="mode on" data-basis="tax">With tax</button>
+          <button class="mode" data-basis="net">Untaxed</button>
+        </span>
+        <span class="user-chip" id="userChip"></span>
+        <select class="linkselect hidden" id="dsPick" title="Dataset"></select>
+        <button class="linkbtn" id="themeBtn" title="Toggle light/dark">Dark</button>
+        <button class="linkbtn" id="logoutBtn">Sign out</button>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-view="plans">Plans <span class="count" id="cPlans"></span></button>
+      <button class="tab" data-view="series">By series <span class="count" id="cSeries"></span></button>
+      <button class="tab" data-view="communities">Communities <span class="count" id="cComms"></span></button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="dashboard">
+      <div id="viewArea"></div>
+    </section>
+  </main>
+
+  <footer class="site-foot">
+    <span>Plan-DB</span>
+    <span class="dot">&middot;</span>
+    <span id="footMeta" class="tiny"></span>
+    <span class="dot">&middot;</span>
+    <a href="mailto:stephen.svedman@lennar.com?subject=Plan-DB%20feedback" id="feedbackLink">Send feedback</a>
+  </footer>
+</div>
+
+<!-- CDN deps: exact versions + SRI, same pins as the other apps. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.3/dist/umd/supabase.js"
+        integrity="sha384-qafw21c/iciq0VXsi9FzkfoQv5I/V0iqE4lSNcKXPnW9/UTJLnv5CcN4FHxVLnKg" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"
+        integrity="sha384-OUW9euuUyxyHcAhTqbhI+Iyb8LMssXt/cpz0yXhs9UWG2/R/uaWdakx/4cfww7Vb" crossorigin="anonymous"></script>
+<script src="config.js?v=1"></script>
+<script src="app.js?v=1"></script>
+</body>
+</html>
