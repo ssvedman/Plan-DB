@@ -156,6 +156,12 @@ function wireChrome(){
   $("dsPick").onchange=async e=>{ state.dataset=e.target.value; state.rng={}; await loadCosts(); render(); };
 }
 function setTab(){ $("tabs").querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.view===state.view)); }
+/* One global listener rather than one per dropdown, since the rail is rebuilt
+   on every render and per-instance listeners would accumulate. */
+(function(){
+  document.addEventListener("click", ()=>closeAllMsel(null));
+  document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeAllMsel(null); });
+})();
 
 /* ---------------- DATA ---------------- */
 async function loadAll(){
@@ -417,15 +423,12 @@ function renderPlans(a, all, list){
       <aside class="filters" id="filters">
         <div class="fgroup">
           <div class="fgh">Series</div>
-          <div class="serchips">${(()=>{ const pool=filtered(all,"series");
-            return seriesKeys.map(k=>{
-            const n=pool.filter(p=>p.series===k).length;
-            if(!n) return "";
-            return `<button class="serchip${state.series[k]?" on":""}" data-chip="series" data-val="${esc(k)}"
-              title="${esc((SERIES[k]&&SERIES[k].blurb)||"")}">${esc(seriesLabel(k))}<span>${n}</span></button>`;
-          }).join(""); })()}</div>
+          ${(()=>{ const pool=filtered(all,"series");
+            const opts=seriesKeys.map(k=>({k,n:pool.filter(p=>p.series===k).length}))
+              .filter(o=>o.n).map(o=>({value:o.k, label:seriesLabel(o.k)+"  ("+o.n+")"}));
+            return mselHTML("dd_series",["series","series"],opts,Object.keys(state.series)); })()}
         </div>
-        ${FACETS.map(f=>chipGroup(f,all)).join("")}
+        ${FACETS.map(f=>facetDropdown(f,all)).join("")}
         ${SLIDERS.map(sl=>`<div class="fgroup">
           <div class="fgh">${esc(sl.label)}${(sl.key==="cpsf"||sl.key==="ext")
             ?`<span class="fgh-note">${state.basis==="tax"?"with tax":"untaxed"}</span>`:""}</div>
@@ -449,9 +452,9 @@ function renderPlans(a, all, list){
   $("chkIncomplete").onchange=e=>{ state.showIncomplete=e.target.checked; state.rng={}; render(); };
   $("btnXlsx").onclick=()=>exportPlans(sortPlans(filtered(planList())));
   $("btnReset").onclick=clearAllFilters;
-  a.querySelectorAll("[data-chip]").forEach(b=>b.onclick=()=>{
-    const bag=state[b.dataset.chip], k=b.dataset.val;
-    bag[k]=!bag[k]; if(!bag[k]) delete bag[k]; render(); });
+  const applyMsel=(bagKey,vals)=>{ const bag={}; vals.forEach(v=>{ bag[v]=true; }); state[bagKey]=bag; render(); };
+  bindMsel("dd_series",["series","series"],v=>applyMsel("series",v));
+  FACETS.forEach(f=>bindMsel("dd_"+f.key,[lc(f.label),lc(f.label)+"s"],v=>applyMsel(f.key,v)));
   a.querySelectorAll("[data-sort]").forEach(b=>b.onclick=()=>{
     const k=b.dataset.sort;
     if(state.sort===k) state.sortDir=-state.sortDir;
@@ -524,10 +527,73 @@ function renderPlans(a, all, list){
     });
   }
 }
-/* A chip row for any single-valued plan attribute (homesite, tier). Renders
-   nothing when the attribute has fewer than two distinct values — a filter
-   with one option is just clutter. */
-function chipGroup(f, all){
+/* ---- multi-select dropdown, ported from Takeoff-Flow so the two tools behave
+   the same way (same markup, classes and keyboard behaviour). `noun` is
+   [singular, plural] so the button reads "1 series selected". ---- */
+function mselLabel(n, noun){ return n ? `${n} ${n===1?noun[0]:noun[1]} selected` : `All ${noun[1]}`; }
+function mselHTML(id, noun, options, selected){
+  const sel=new Set(selected||[]);
+  return `<div class="pl-dd" id="${id}">
+      <button type="button" class="btn mini ghost pl-dd-btn" data-msel-btn>${esc(mselLabel(sel.size,noun))} &#9662;</button>
+      <div class="pl-dd-panel hidden">
+        <input type="text" class="pl-dd-search" placeholder="Search ${esc(noun[1])}…">
+        <button type="button" class="linkbtn pl-dd-master">Select all</button>
+        <div class="pl-dd-list">${
+          options.map(o=>`<label class="msel-opt pl-dd-opt"><input type="checkbox" value="${esc(o.value)}"${sel.has(o.value)?" checked":""}> ${esc(o.label)}</label>`).join("")
+          || `<div class="empty" style="padding:12px">Nothing to filter on.</div>`}</div>
+        <button type="button" class="linkbtn pl-dd-clearall">Clear selection</button>
+      </div>
+    </div>`;
+}
+function bindMsel(id, noun, onChange){
+  const root=$(id); if(!root) return;
+  const panel=root.querySelector(".pl-dd-panel"), btn=root.querySelector("[data-msel-btn]"),
+        search=root.querySelector(".pl-dd-search"), list=root.querySelector(".pl-dd-list");
+  const boxes=()=>[...list.querySelectorAll("input[type=checkbox]")];
+  const vis=()=>boxes().filter(b=>b.closest(".pl-dd-opt").style.display!=="none");
+  const emit=()=>{ const on=boxes().filter(b=>b.checked).map(b=>b.value);
+    btn.innerHTML=esc(mselLabel(on.length,noun))+" &#9662;";
+    onChange(on); };
+  /* The filter rail scrolls, so an absolutely-positioned panel would be clipped
+     by its overflow. Anchor the panel to the button in viewport coordinates
+     instead, and keep it there while the rail or page scrolls. */
+  const place=()=>{
+    const r=btn.getBoundingClientRect();
+    panel.style.position="fixed";
+    panel.style.left=Math.min(r.left, window.innerWidth-320)+"px";
+    panel.style.top=(r.bottom+4)+"px";
+    panel.style.width=Math.max(r.width,240)+"px";
+    panel.style.maxHeight=(window.innerHeight-r.bottom-24)+"px";
+    panel.style.overflowY="auto";
+  };
+  const onScroll=()=>{ if(!panel.classList.contains("hidden")) place(); };
+  btn.onclick=e=>{ e.stopPropagation();
+    closeAllMsel(panel);                       // one open at a time
+    const hid=panel.classList.toggle("hidden");
+    if(!hid){ place(); search.focus();
+      window.addEventListener("scroll",onScroll,true);
+      window.addEventListener("resize",onScroll);
+    } else {
+      window.removeEventListener("scroll",onScroll,true);
+      window.removeEventListener("resize",onScroll);
+    }
+  };
+  panel.onclick=e=>e.stopPropagation();
+  search.oninput=()=>{ const q=lc(search.value);
+    boxes().forEach(b=>{ const o=b.closest(".pl-dd-opt"); o.style.display=(!q||lc(o.textContent).includes(q))?"":"none"; }); };
+  search.onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); panel.classList.add("hidden"); } };
+  root.querySelector(".pl-dd-master").onclick=()=>{ const v=vis(); const allOn=v.length&&v.every(b=>b.checked); v.forEach(b=>b.checked=!allOn); emit(); };
+  root.querySelector(".pl-dd-clearall").onclick=()=>{ boxes().forEach(b=>b.checked=false); search.value="";
+    boxes().forEach(b=>b.closest(".pl-dd-opt").style.display=""); emit(); };
+  list.onchange=emit;
+}
+function closeAllMsel(except){
+  document.querySelectorAll(".pl-dd-panel").forEach(p=>{ if(p!==except) p.classList.add("hidden"); });
+}
+
+/* One dropdown per facet. Option counts are computed with every OTHER filter
+   applied, so a count never promises rows the list won't show. */
+function facetDropdown(f, all){
   const {key,label,get}=f;
   const pool=filtered(all, key);
   const counts=new Map();
@@ -539,10 +605,10 @@ function chipGroup(f, all){
     if(isFinite(na)&&isFinite(nb)&&na!==nb) return na-nb;
     return String(a).localeCompare(String(b));
   });
+  const opts=vals.map(v=>({ value:v,
+    label:(v==="—"?"Unlisted":(f.fmt?f.fmt(v):v))+"  ("+counts.get(v)+")" }));
   return `<div class="fgroup"><div class="fgh">${esc(label)}</div>
-    <div class="serchips">${vals.map(v=>
-      `<button class="serchip${state[key][v]?" on":""}" data-chip="${esc(key)}" data-val="${esc(v)}">${
-        esc(v==="—"?"Unlisted":(f.fmt?f.fmt(v):v))}<span>${counts.get(v)}</span></button>`).join("")}</div></div>`;
+    ${mselHTML("dd_"+key,[lc(label),lc(label)+"s"],opts,Object.keys(state[key]))}</div>`;
 }
 function planRowHTML(p){
   const rangeCp = (p.cpsfLo!=null && p.cpsfHi!=null && p.cpsfHi-p.cpsfLo>0.01)

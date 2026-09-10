@@ -298,8 +298,14 @@ textarea.ed-in{min-height:90px;resize:vertical}
 
 /* ---- layout: filter rail + list ---- */
 .plansplit{display:grid;grid-template-columns:246px 1fr;gap:16px;align-items:start}
+/* The rail is sticky, so when it is taller than the viewport its lower half is
+   unreachable: the page only scrolls as far as the (much longer) results column
+   dictates. Capping its height and letting it scroll itself makes both columns
+   independently scrollable. `overscroll-behavior` stops a rail that has hit its
+   end from handing the scroll on to the page. */
 .filters{position:sticky;top:96px;background:var(--card);border:1px solid var(--line);
-  border-radius:var(--radius);padding:14px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:18px}
+  border-radius:var(--radius);padding:14px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:18px;
+  max-height:calc(100vh - 112px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .fgroup{display:flex;flex-direction:column}
 .fgh{font-size:11.5px;font-weight:700;color:var(--mute);text-transform:uppercase;letter-spacing:.04em;
   margin-bottom:9px;display:flex;align-items:baseline;gap:6px}
@@ -433,3 +439,22 @@ textarea.ed-in{min-height:90px;resize:vertical}
 .ccbar i{font-style:normal;font-size:11px;color:var(--mute);margin-left:6px}
 @media(max-width:980px){ .pt .c-bb,.pt th.c-bb{display:none} }
 @media(max-width:760px){ .pt .c-pr,.pt th.c-pr,.pt .c-gm,.pt th.c-gm{display:none} }
+
+/* ---- multi-select dropdown (ported from Takeoff-Flow, same classes) ---- */
+.msel-opt{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;font-size:13px;
+  color:var(--ink);font-weight:500;cursor:pointer;white-space:nowrap}
+.msel-opt:hover{background:var(--blue-050)}
+.msel-opt input{accent-color:var(--blue);flex:0 0 auto}
+.pl-dd{position:relative;display:block}
+.pl-dd-btn{white-space:nowrap;width:100%;justify-content:space-between}
+.pl-dd-panel{position:absolute;top:110%;left:0;z-index:130;min-width:240px;max-width:340px;box-sizing:border-box;
+  background:var(--card);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:8px;text-align:left}
+.pl-dd-search{box-sizing:border-box;width:100%;padding:7px 10px;border:1.5px solid var(--line);border-radius:8px;
+  font-size:13px;margin-bottom:6px;background:var(--card);color:var(--ink)}
+.pl-dd-search:focus{outline:none;border-color:var(--blue)}
+.pl-dd-master,.pl-dd-clearall{display:block;width:100%;text-align:left;font-weight:600;color:var(--blue)}
+.pl-dd-list{max-height:260px;overflow-y:auto;scrollbar-width:thin}
+.pl-dd-opt{white-space:nowrap}
+/* A panel inside a scrolling rail would be clipped by the rail's overflow, so
+   the rail gets room to show it and the panel is allowed to sit above. */
+.fgroup{position:relative}
