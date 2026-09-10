@@ -159,14 +159,25 @@ function wireChrome(){
   $("dsPick").onchange=async e=>{ state.dataset=e.target.value; state.rng={}; await loadCosts(); render(); };
 }
 function setTab(){ $("tabs").querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.view===state.view)); }
-/* The filter rail sits below the sticky topbar. Its height was hard-coded to
-   96px, which is wrong whenever the topbar wraps — the rail then ran past the
-   bottom of the window and its last filters were unreachable. Measure it. */
+/* The filter rail must never extend past the bottom of the window, or its last
+   filters are unreachable. Its top offset is NOT constant: at the top of the
+   page the rail starts below the toolbar row, and only rises to the sticky
+   offset once you scroll. Sizing it from the sticky offset alone left it
+   hanging off-screen at scroll-top. So measure the live top and cap the height
+   from that, on scroll as well as resize.
+
+   No feedback loop: a sticky element's top is min(natural, stickyOffset) and
+   does not depend on its own height. */
 function syncRailTop(){
-  const tb=document.querySelector(".topbar"); if(!tb) return;
-  document.documentElement.style.setProperty("--railtop", Math.round(tb.getBoundingClientRect().height)+"px");
+  const tb=document.querySelector(".topbar");
+  if(tb) document.documentElement.style.setProperty("--railtop", Math.round(tb.getBoundingClientRect().height)+"px");
+  const el=document.getElementById("filters");
+  if(!el) return;
+  const top=el.getBoundingClientRect().top;
+  el.style.maxHeight=Math.max(240, Math.round(window.innerHeight - top - 16))+"px";
 }
 window.addEventListener("resize", syncRailTop);
+window.addEventListener("scroll", syncRailTop, {passive:true});
 /* One global listener rather than one per dropdown, since the rail is rebuilt
    on every render and per-instance listeners would accumulate. */
 (function(){
@@ -475,6 +486,7 @@ function renderPlans(a, all, list){
   });
 
   SLIDERS.forEach(sl=>rangeSlider("rs_"+sl.key, sl.key, sl.fmt));
+  syncRailTop();                       // the rail exists now — cap it to the window
 
   // hand the list painter to the slider, which repaints only this region while
   // dragging (a full render() would rebuild the slider under the user's finger)

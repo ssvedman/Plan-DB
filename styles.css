@@ -305,6 +305,10 @@ textarea.ed-in{min-height:90px;resize:vertical}
    end from handing the scroll on to the page. */
 .filters{position:sticky;top:calc(var(--railtop, 96px) + 8px);background:var(--card);border:1px solid var(--line);
   border-radius:var(--radius);padding:14px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:18px;
+  /* Fallback only. The real cap is set in JS from the rail's live top offset:
+     the rail sits below the toolbar when the page is at the top and only rises
+     to the sticky offset once scrolled, so a single static height is wrong at
+     one end or the other. */
   max-height:calc(100vh - var(--railtop, 96px) - 24px);
   overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;padding-bottom:20px}
 .fgroup{display:flex;flex-direction:column}
