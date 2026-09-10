@@ -173,17 +173,6 @@ function wireChrome(){
     state.rng={};                       // cost ranges are basis-specific — recompute
     render();
   });
-  $("dsPick").onchange=async e=>{
-    state.dataset=e.target.value; state.rng={};
-    state.cmp=defaultCmp(state.dataset);
-    state.ccv=null; state.ccd={}; state.ccvErr=null;    // aggregates are per dataset
-    await loadCosts(); render();
-  };
-  $("cmpPick").onchange=e=>{
-    state.cmp=e.target.value||null;
-    state.ccv=null; state.ccd={}; state.ccvErr=null;    // variance carries a prev column
-    render();
-  };
 }
 function setTab(){ $("tabs").querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.view===state.view)); }
 /* The filter rail must never extend past the bottom of the window, or its last
@@ -223,18 +212,56 @@ async function loadAll(){
     const { data:ds } = await sb.from("pdb_plan_costs").select("dataset").eq("division",CFG.DIVISION.key);
     state.datasets=[...new Set((ds||[]).map(r=>r.dataset))].sort().reverse();
   }catch(e){ state.datasets=[]; }
-  if(!state.dataset) state.dataset = state.datasets[0] || window.PDB_DEFAULT_DATASET || null;
-  if(!state.cmp) state.cmp = defaultCmp(state.dataset);
+  /* Opens on the newest month. An older one can be chosen, but the app says so
+     loudly while it is — the failure mode worth designing against is reading a
+     stale month as if it were current, not the inconvenience of switching. */
+  state.dataset = state.datasets[0] || window.PDB_DEFAULT_DATASET || null;
+  state.cmp     = priorTo(state.dataset);
   await loadHist();
   await loadCosts();
 }
-/* The dataset a month is measured against: the next one back in time, or the
-   next one forward if you are already looking at the oldest. Null when only
-   one month is loaded. */
-function defaultCmp(ds){
+/* `datasets` runs newest first, so the month before any given one is the next
+   entry along. The oldest month loaded has nothing before it and shows no
+   trend rather than borrowing a later month and inverting the sign. */
+function priorTo(ds){
   const i=state.datasets.indexOf(ds);
-  if(i<0 || state.datasets.length<2) return null;
-  return state.datasets[i+1] || state.datasets[i-1] || null;
+  return i<0 ? null : (state.datasets[i+1] || null);
+}
+function isCurrent(){ return !state.datasets.length || state.dataset===state.datasets[0]; }
+/* Every route into a different month goes through here — the picker, the
+   "back to current" button, and clicking a month on the chart — so none of
+   them can forget to drop the caches that belong to the month being left. */
+async function setDataset(ds){
+  if(!ds || ds===state.dataset) return;
+  state.dataset = ds;
+  state.cmp     = priorTo(ds);
+  state.rng     = {};                 // cost bounds are per month
+  state.ccv=null; state.ccd={}; state.ccvErr=null; state.openCode={};
+  state.cc={}; state.ccBusy={};
+  await loadCosts();
+  render();
+}
+/* The month strip, under the tabs rather than in the toolbar: it scopes every
+   view, so it belongs to the page, not to one table. */
+function renderScope(){
+  const el=$("scope"); if(!el) return;
+  if(state.datasets.length<2){ el.classList.add("hidden"); el.innerHTML=""; return; }
+  el.classList.remove("hidden");
+  const stale=!isCurrent();
+  el.classList.toggle("stale", stale);
+  const note = stale
+    ? `This is not the current month — ${esc(dsLabel(state.datasets[0]))} is.`
+    : state.cmp ? `Current month. Trend compares it with ${esc(dsLabel(state.cmp))}.`
+                : `Current month.`;
+  el.innerHTML=`<div class="scope-in">
+      <label class="scope-l" for="dsPick">Month</label>
+      <select class="scope-sel" id="dsPick">${state.datasets.map((d,i)=>
+        `<option value="${esc(d)}"${d===state.dataset?" selected":""}>${esc(dsLabel(d))}${i===0?" (current)":""}</option>`).join("")}</select>
+      <span class="scope-note">${note}</span>
+      ${stale?`<button class="btn mini ghost" id="dsNow">Back to ${esc(dsLabel(state.datasets[0]))}</button>`:""}
+    </div>`;
+  $("dsPick").onchange=e=>setDataset(e.target.value);
+  if($("dsNow")) $("dsNow").onclick=()=>setDataset(state.datasets[0]);
 }
 /* Deltas and the trend chart need every month at once, but only a handful of
    columns. Asking for those columns keeps the whole history smaller than one
@@ -300,15 +327,6 @@ async function loadCosts(){
     }
   }catch(e){ console.error(e); state.rows=[]; }
   await loadOptions();
-  const sel=$("dsPick"), cmp=$("cmpPick");
-  if(state.datasets.length>1){
-    sel.classList.remove("hidden");
-    sel.innerHTML=state.datasets.map(d=>`<option value="${esc(d)}"${d===state.dataset?" selected":""}>${esc(dsLabel(d))}</option>`).join("");
-    cmp.classList.remove("hidden");
-    cmp.innerHTML=`<option value="">no comparison</option>`+
-      state.datasets.filter(d=>d!==state.dataset)
-        .map(d=>`<option value="${esc(d)}"${d===state.cmp?" selected":""}>vs ${esc(dsLabel(d))}</option>`).join("");
-  } else { sel.classList.add("hidden"); cmp.classList.add("hidden"); }
 }
 const MONTHS=["January","February","March","April","May","June","July","August","September","October","November","December"];
 function dsLabel(d){
@@ -548,10 +566,16 @@ function render(){
   $("cPlans").textContent  = filtered(all).length;
   $("cSeries").textContent = new Set(filtered(all,"series").map(p=>p.series)).size;
   $("cComms").textContent  = new Set(state.rows.map(r=>r.comm_num).filter(Boolean)).size;
+  /* With no month picker in the header this is the only thing that says which
+     month is on screen and what the trend is measured against, so it says
+     both. */
   $("footMeta").textContent = state.rows.length
-    ? `${dsLabel(state.dataset)} · ${state.rows.length.toLocaleString()} rows · ${state.basis==="tax"?"with tax":"untaxed"}`
+    ? [dsLabel(state.dataset), state.cmp?"trend vs "+dsLabel(state.cmp):null,
+       state.rows.length.toLocaleString()+" rows",
+       state.basis==="tax"?"with tax":"untaxed"].filter(Boolean).join(" · ")
     : "";
   const tt=$("tTrend"); if(tt) tt.classList.toggle("hidden", state.datasets.length<2);
+  renderScope();
   const a=$("viewArea");
   if(!state.rows.length && !Object.keys(state.plans).length) return renderEmpty(a);
   if(state.view==="series") return renderSeries(a, all);
@@ -607,7 +631,7 @@ function renderPlans(a, all, list){
         <div class="sortbar">
           <span class="hint">Sort</span>
           ${[["name","Plan"],["cpsf","Cost / sq ft"],["ext","Extended cost"],["price","Sales price"],["gm","Margin"],["sqft","Sq ft"],["comms","Communities"]]
-            .concat(state.cmp?[["delta","Change vs "+dsLabel(state.cmp)]]:[])
+            .concat(state.cmp?[["delta","Trend"]]:[])
             .map(([k,l])=>`<button class="sortb${state.sort===k?" on":""}" data-sort="${k}">${l}${state.sort===k?`<i>${state.sortDir>0?"▲":"▼"}</i>`:""}</button>`).join("")}
         </div>
         <div id="planList"></div>
@@ -677,7 +701,7 @@ function renderPlans(a, all, list){
           <thead><tr><th class="c-plan">Plan</th><th class="c-sq">Sq ft</th><th class="c-bb">Bd / Ba</th>
             <th class="c-cp">Cost / sq ft</th><th class="c-ex">Extended cost</th>
             <th class="c-pr">Sales price</th><th class="c-gm">Margin</th>
-            ${state.cmp?`<th class="c-dl" title="Like-for-like change against ${esc(dsLabel(state.cmp))}">vs ${esc(dsShort(state.cmp))}</th>`:""}
+            ${state.cmp?`<th class="c-dl" title="Like-for-like change from ${esc(dsLabel(state.cmp))} to ${esc(dsLabel(state.dataset))}">Trend</th>`:""}
             <th class="c-cm">Comms</th><th class="c-ch"></th></tr></thead>
           <tbody>${g.map(planRowHTML).join("")}</tbody>
         </table></section>`;
@@ -1168,6 +1192,17 @@ function lineChart(o){
                                 : padL + i*(W-padL-padR)/(labels.length-1);
   const Y=v=> padT + (1-(v-lo)/(hi-lo))*(H-padT-padB);
 
+  /* Optional: each month is a clickable column. The hit areas are drawn first
+     so they sit behind the line and its points — the points stay hoverable for
+     their tooltips, and carry the same data attribute so clicking one works
+     too. */
+  const hits = !o.xClick ? "" : labels.map((l,i)=>{
+    const w = labels.length>1 ? (W-padL-padR)/(labels.length-1) : (W-padL-padR);
+    return `<rect class="ch-hit${o.activeX===i?" on":""}" data-xi="${i}"
+        x="${(X(i)-w/2).toFixed(2)}" y="${padT}" width="${w.toFixed(2)}"
+        height="${(H-padT-padB).toFixed(2)}"><title>${esc(o.xTitle?o.xTitle(l):l)}</title></rect>`;
+  }).join("");
+
   const TICKS=4;
   let grid="";
   for(let t=0;t<=TICKS;t++){
@@ -1176,7 +1211,9 @@ function lineChart(o){
         + `<text x="${padL-8}" y="${y}" class="ch-yl">${esc(fmtY(v))}</text>`;
   }
   const xl=labels.map((l,i)=>
-    `<text x="${X(i).toFixed(2)}" y="${H-6}" class="ch-xl">${esc(l)}</text>`).join("");
+    `<text x="${X(i).toFixed(2)}" y="${H-6}"
+       class="ch-xl${o.xClick?" click":""}${o.activeX===i?" on":""}"${o.xClick?` data-xi="${i}"`:""}
+       >${esc(l)}</text>`).join("");
 
   const body=lines.map((l,li)=>{
     const col=l.color||CHART_COLORS[li%CHART_COLORS.length];
@@ -1190,7 +1227,7 @@ function lineChart(o){
          stroke-linejoin="round"${l.dash?` stroke-dasharray="${l.dash}"`:""}/>`).join("");
     const dots=runs.flat().map(([i,v])=>
       `<circle cx="${X(i).toFixed(2)}" cy="${Y(v).toFixed(2)}" r="${l.width>2.5?4:3.2}"
-         fill="${col}"><title>${esc(labels[i]+" · "+(l.label||"")+" · "+fmtY(v))}</title></circle>`).join("");
+         fill="${col}"${o.xClick?` data-xi="${i}"`:""}><title>${esc(labels[i]+" · "+(l.label||"")+" · "+fmtY(v))}</title></circle>`).join("");
     return paths+dots;
   }).join("");
 
@@ -1201,7 +1238,7 @@ function lineChart(o){
 
   return `<div class="chart">
     <svg viewBox="0 0 ${W} ${H}" class="ch" role="img"
-         aria-label="${esc(o.alt||"Line chart")}">${grid}${xl}${body}</svg>
+         aria-label="${esc(o.alt||"Line chart")}">${hits}${grid}${xl}${body}</svg>
     ${legend}</div>`;
 }
 
@@ -1286,7 +1323,10 @@ function renderTrends(a, all){
           <input type="checkbox" id="chkLFL" ${state.trendLFL?"checked":""}> Like-for-like only</label>
       </div>
       ${lineChart({ labels:t.ds.map(dsShort), lines, fmtY:money2, height:280,
-                    alt:"Average cost per square foot by month" })}
+                    alt:"Average cost per square foot by month",
+                    xClick:true, activeX:t.ds.indexOf(state.dataset),
+                    xTitle:l=>"Show the tables for "+l })}
+      <div class="charthint tiny">Click a month on the chart to load its figures into the other tabs.</div>
       <div class="serpicks">
         <span class="hint">Series lines</span>
         ${keys.map((k,i)=>`<button class="serpick${state.trendSeries[k]?" on":""}" data-sp="${esc(k)}">
@@ -1297,6 +1337,12 @@ function renderTrends(a, all){
     ${movers}`;
 
   $("chkLFL").onchange=e=>{ state.trendLFL=e.target.checked; renderTrends(a,all); };
+  /* Clicking a month on the chart scopes the whole app to it. The chart keeps
+     showing every month either way — only the tables follow the selection. */
+  a.querySelectorAll("[data-xi]").forEach(el=>el.addEventListener("click",()=>{
+    const ds=t.ds[+el.getAttribute("data-xi")];
+    if(ds && ds!==state.dataset) setDataset(ds);
+  }));
   a.querySelectorAll("[data-sp]").forEach(b=>b.onclick=()=>{
     const k=b.dataset.sp; state.trendTouched=true;
     state.trendSeries[k]=!state.trendSeries[k]; renderTrends(a,all); });
@@ -1419,7 +1465,7 @@ function renderCodes(a){
       <table class="pt cvt">
       <thead><tr><th>Code</th><th>Description</th><th>Avg / sq ft</th><th>Range</th>
         <th>Disagreement</th><th>Inconsistency</th>
-        ${state.cmp?`<th>vs ${esc(dsShort(state.cmp))}</th>`:""}
+        ${state.cmp?`<th title="Change from ${esc(dsLabel(state.cmp))} to ${esc(dsLabel(state.dataset))}">Trend</th>`:""}
         <th>Plans</th><th class="c-ch"></th></tr></thead>
       <tbody>${shown.map(r=>ccRowHTML(r,maxSpread)).join("")}</tbody></table>
     </div>`;

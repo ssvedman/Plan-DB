@@ -26,7 +26,13 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
 - A plan's headline figure is the average across the communities that offer it;
   the smaller figure underneath is the range. Sliders filter on the average.
 - Margin is sales price minus extended cost, and follows the tax toggle.
-- Months coexist. The app lists every one loaded and opens on the newest.
+- Months coexist. The app opens on the newest; the month strip under the tabs
+  changes it, as does clicking a month on the trend chart. Choosing an older
+  one turns the strip amber and offers a way back — reading a stale month as
+  current is the failure worth designing against.
+- The charts always draw every month loaded, whichever one the tables are
+  showing. The trend column always compares the shown month with the one
+  immediately before it, so the oldest month loaded has no trend column.
 - A change between two months is measured only over the rows present in both,
   matched on community, plan and elevation, and the count of matched rows is
   always shown. Comparing each month's own average instead would report a
