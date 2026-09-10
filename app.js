@@ -866,8 +866,16 @@ function rangeSlider(hostId, key, fmt){
   const lo=host.querySelector(".rs-lo"), hi=host.querySelector(".rs-hi");
   const fill=host.querySelector(".rs-fill");
   const loV=host.querySelector(".rs-lo-v"), hiV=host.querySelector(".rs-hi-v");
+  /* The thumb's centre sits at  thumb/2 + f*(width - thumb),  not at f*width.
+     Expressing the fill the same way in calc() keeps it welded to the thumbs at
+     every position without JS needing to know the pixel width. The thumb size
+     is read back from CSS so the two can't drift apart. */
+  const T=parseFloat(getComputedStyle(host.querySelector(".rs")).getPropertyValue("--rs-thumb"))||17;
+  const at=v=>{ const f=(v-r.min)/span; return `calc(${(f*100).toFixed(4)}% + ${((0.5-f)*T).toFixed(2)}px)`; };
   const paint=()=>{
-    fill.style.left=pct(r.lo)+"%"; fill.style.width=Math.max(0,pct(r.hi)-pct(r.lo))+"%";
+    const fLo=(r.lo-r.min)/span, fHi=(r.hi-r.min)/span, d=Math.max(0,fHi-fLo);
+    fill.style.left=at(r.lo);
+    fill.style.width=`calc(${(d*100).toFixed(4)}% - ${(d*T).toFixed(2)}px)`;
     loV.textContent=fmt(r.lo); hiV.textContent=fmt(r.hi);
     // when both thumbs pile up at the max, the low thumb must sit on top to stay draggable
     lo.style.zIndex = (r.lo > r.max - span*0.02) ? 5 : 3;

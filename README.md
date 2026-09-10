@@ -48,4 +48,10 @@ The app shows an empty state until step 2 runs.
   default view is margin against taxed cost.
 - To load a new month: re-run the extraction over the new source folder, emit a
   seed with a new `dataset` value, and run it. Months coexist and the app gains
-  a picker.
+  a picker and opens on the newest.
+- A row is marked unreliable by three independent signals: an impossibly low
+  figure; the same plan priced far below what it costs in other communities
+  that month; or the same row roughly doubling in a later month at identical
+  sq ft. The last one only applies where a later month has been loaded, and it
+  is why loading a new month can re-flag an older one — re-run the older seed
+  after adding a newer one.

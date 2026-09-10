@@ -325,20 +325,33 @@ textarea.ed-in{min-height:90px;resize:vertical}
 
 /* ---- 2-point range slider ---- */
 .rs-vals{display:flex;justify-content:space-between;font-size:12.5px;font-weight:700;color:var(--ink);margin-bottom:6px}
-.rs-body{position:relative;height:22px;display:flex;align-items:center}
-.rs-rail{position:absolute;left:0;right:0;height:5px;border-radius:5px;background:var(--blue-050)}
+/* A range thumb's CENTRE travels from thumb/2 to width-thumb/2, never 0 to
+   width. So the painted rail is inset by half a thumb at each end — that way
+   the thumbs reach its true ends — and the fill is positioned with the same
+   inset (see rangeSlider). --rs-thumb is the single source of truth for the
+   size; the JS reads it back rather than hard-coding a matching number.
+   Everything is centred with an explicit top/translate: absolutely-positioned
+   children with no `top` fall back to a static position that differs between
+   browsers, which is what left the thumbs off the line. */
+.rs{--rs-thumb:17px}
+.rs-body{position:relative;height:22px}
+.rs-rail,.rs-fill{position:absolute;top:50%;transform:translateY(-50%);height:5px;border-radius:5px}
+.rs-rail{left:calc(var(--rs-thumb)/2);right:calc(var(--rs-thumb)/2);background:var(--blue-050)}
 [data-theme="dark"] .rs-rail{background:#1b3550}
-.rs-fill{position:absolute;height:5px;border-radius:5px;background:var(--blue-600)}
-.rs-in{position:absolute;left:0;width:100%;margin:0;height:22px;background:none;-webkit-appearance:none;
-  appearance:none;pointer-events:none;outline:none}
+.rs-fill{background:var(--blue-600)}
+.rs-in{position:absolute;left:0;top:50%;transform:translateY(-50%);width:100%;margin:0;
+  height:var(--rs-thumb);background:none;-webkit-appearance:none;appearance:none;
+  pointer-events:none;outline:none}
 .rs-in.rs-lo{z-index:3}
 .rs-in.rs-hi{z-index:4}
-.rs-in::-webkit-slider-runnable-track{height:22px;background:none;border:none}
-.rs-in::-moz-range-track{height:22px;background:none;border:none}
+/* track height == thumb height, so the thumb needs no margin nudge to centre */
+.rs-in::-webkit-slider-runnable-track{height:var(--rs-thumb);background:none;border:none}
+.rs-in::-moz-range-track{height:var(--rs-thumb);background:none;border:none}
 .rs-in::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;pointer-events:auto;cursor:grab;
-  width:17px;height:17px;border-radius:50%;background:var(--blue-600);border:2px solid var(--card);
-  box-shadow:0 1px 4px rgba(10,37,64,.35)}
-.rs-in::-moz-range-thumb{pointer-events:auto;cursor:grab;width:15px;height:15px;border-radius:50%;
+  width:var(--rs-thumb);height:var(--rs-thumb);margin-top:0;border-radius:50%;
+  background:var(--blue-600);border:2px solid var(--card);box-shadow:0 1px 4px rgba(10,37,64,.35)}
+.rs-in::-moz-range-thumb{pointer-events:auto;cursor:grab;box-sizing:border-box;
+  width:var(--rs-thumb);height:var(--rs-thumb);border-radius:50%;
   background:var(--blue-600);border:2px solid var(--card);box-shadow:0 1px 4px rgba(10,37,64,.35)}
 .rs-in:active::-webkit-slider-thumb{cursor:grabbing}
 .rs-in:focus-visible::-webkit-slider-thumb{outline:2px solid var(--navy);outline-offset:2px}

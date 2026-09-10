@@ -53,5 +53,5 @@ window.PDB_SERIES_LABEL = { LEGACY: "Legacy (unassigned)", SHELL: "Building shel
 
 /* Dataset to show by default. The app lists every dataset present and
    defaults to the newest, so this is only a fallback for an empty database. */
-window.PDB_DEFAULT_DATASET = "2026-04";
+window.PDB_DEFAULT_DATASET = "2026-07";
 
