@@ -45,17 +45,25 @@ if (!DEMO && window.supabase) {
 const state = {
   email:null, role:"viewer", view:"plans",
   rows:[], plans:{}, datasets:[], dataset:null,
+  cmp:null,                          // dataset the current one is measured against
+  hist:[],                           // every dataset, few columns — drives deltas and trends
   basis:"tax",                       // "tax" = with tax, "net" = untaxed
   q:"", sort:"name", sortDir:1,
   series:{},                         // series key -> included? (empty = all)
   site:{}, tier:{}, beds:{}, baths:{}, sty:{}, status:{},   // chip facets, see FACETS
   options:[],                        // per-plan options (small, loaded up front)
   cc:{}, ccBusy:{},                  // cost codes per plan — fetched on demand
+  ccv:null, ccvBusy:false, ccvErr:null,   // cost-code variance (server-aggregated)
+  ccd:{}, ccdBusy:{},                // one code's plan-by-plan detail, on demand
+  ccSort:"spread", ccq:"",
   showShells:false,
   showAwaiting:true,                 // roster plans with no cost yet — shown by default
   showIncomplete:false,              // rows whose figures look unreliable
   rng:{},                            // key -> {min,max,lo,hi} live slider state
-  open:{}                            // plan_no -> drill-down expanded?
+  open:{},                           // plan_no -> drill-down expanded?
+  openComm:{}, openCode:{},          // community / cost-code drill-downs
+  trendSeries:{}, trendTouched:false,// series key -> line shown on the trend chart?
+  trendLFL:true                      // chart only homes priced in every month
 };
 const $  = id => document.getElementById(id);
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -65,6 +73,15 @@ const money = v => v==null?"—":"$"+Math.round(v).toLocaleString();
 const money2= v => v==null?"—":"$"+v.toFixed(2);
 const sqftF = v => v==null?"—":Math.round(v).toLocaleString();
 const pctF = v => v==null?"—":(v*100).toFixed(1)+"%";
+const signPct = v => v==null?"—":(v>0?"+":v<0?"−":"")+Math.abs(v*100).toFixed(1)+"%";
+const signMoney2 = v => v==null?"—":(v>0?"+":v<0?"−":"")+"$"+Math.abs(v).toFixed(2);
+const signMoney = v => v==null?"—":(v>0?"+":v<0?"−":"")+"$"+Math.round(Math.abs(v)).toLocaleString();
+/* Search is matched twice: once literally, and once with every separator
+   stripped, so "h-006", "h 006" and "H006" are the same query — and an old
+   plan number typed the old way still finds the plan that carries it as an
+   alias. */
+const norm = s => lc(s).replace(/[^a-z0-9]+/g,"");
+const mean = v => v.length ? v.reduce((a,b)=>a+b,0)/v.length : null;
 
 /* ---------------- modal dialogs (shared pattern with the other apps) ------- */
 function openModal({title, body, buttons}){
@@ -156,7 +173,17 @@ function wireChrome(){
     state.rng={};                       // cost ranges are basis-specific — recompute
     render();
   });
-  $("dsPick").onchange=async e=>{ state.dataset=e.target.value; state.rng={}; await loadCosts(); render(); };
+  $("dsPick").onchange=async e=>{
+    state.dataset=e.target.value; state.rng={};
+    state.cmp=defaultCmp(state.dataset);
+    state.ccv=null; state.ccd={}; state.ccvErr=null;    // aggregates are per dataset
+    await loadCosts(); render();
+  };
+  $("cmpPick").onchange=e=>{
+    state.cmp=e.target.value||null;
+    state.ccv=null; state.ccd={}; state.ccvErr=null;    // variance carries a prev column
+    render();
+  };
 }
 function setTab(){ $("tabs").querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.view===state.view)); }
 /* The filter rail must never extend past the bottom of the window, or its last
@@ -197,7 +224,36 @@ async function loadAll(){
     state.datasets=[...new Set((ds||[]).map(r=>r.dataset))].sort().reverse();
   }catch(e){ state.datasets=[]; }
   if(!state.dataset) state.dataset = state.datasets[0] || window.PDB_DEFAULT_DATASET || null;
+  if(!state.cmp) state.cmp = defaultCmp(state.dataset);
+  await loadHist();
   await loadCosts();
+}
+/* The dataset a month is measured against: the next one back in time, or the
+   next one forward if you are already looking at the oldest. Null when only
+   one month is loaded. */
+function defaultCmp(ds){
+  const i=state.datasets.indexOf(ds);
+  if(i<0 || state.datasets.length<2) return null;
+  return state.datasets[i+1] || state.datasets[i-1] || null;
+}
+/* Deltas and the trend chart need every month at once, but only a handful of
+   columns. Asking for those columns keeps the whole history smaller than one
+   month of the full table, so it loads up front and nothing else has to go
+   back to the network to compare two periods. */
+async function loadHist(){
+  state.hist=[];
+  if(DEMO||!sb) return;
+  const COLS="dataset,comm_num,community,jde,plan_no,elev,sqft,cpsf,cpsf_tax,ext_price,ext_price_tax,base_price,incomplete,kind";
+  try{
+    const PAGE=1000;
+    for(let from=0;;from+=PAGE){
+      const { data,error } = await sb.from("pdb_plan_costs").select(COLS)
+        .eq("division",CFG.DIVISION.key).range(from, from+PAGE-1);
+      if(error) throw error;
+      state.hist=state.hist.concat(data||[]);
+      if(!data || data.length<PAGE) break;
+    }
+  }catch(e){ console.error(e); state.hist=[]; }
 }
 /* Supabase caps a select at 1000 rows by default; page through so a year of
    datasets doesn't silently truncate. */
@@ -244,15 +300,24 @@ async function loadCosts(){
     }
   }catch(e){ console.error(e); state.rows=[]; }
   await loadOptions();
-  const sel=$("dsPick");
+  const sel=$("dsPick"), cmp=$("cmpPick");
   if(state.datasets.length>1){
     sel.classList.remove("hidden");
     sel.innerHTML=state.datasets.map(d=>`<option value="${esc(d)}"${d===state.dataset?" selected":""}>${esc(dsLabel(d))}</option>`).join("");
-  } else sel.classList.add("hidden");
+    cmp.classList.remove("hidden");
+    cmp.innerHTML=`<option value="">no comparison</option>`+
+      state.datasets.filter(d=>d!==state.dataset)
+        .map(d=>`<option value="${esc(d)}"${d===state.cmp?" selected":""}>vs ${esc(dsLabel(d))}</option>`).join("");
+  } else { sel.classList.add("hidden"); cmp.classList.add("hidden"); }
 }
+const MONTHS=["January","February","March","April","May","June","July","August","September","October","November","December"];
 function dsLabel(d){
   const m=String(d||"").match(/^(\d{4})-(\d{2})$/); if(!m) return d;
-  return ["January","February","March","April","May","June","July","August","September","October","November","December"][+m[2]-1]+" "+m[1];
+  return MONTHS[+m[2]-1]+" "+m[1];
+}
+function dsShort(d){
+  const m=String(d||"").match(/^(\d{4})-(\d{2})$/); if(!m) return d;
+  return MONTHS[+m[2]-1].slice(0,3)+" "+m[1].slice(2);
 }
 
 /* ---------------- ROLLUP ----------------
@@ -263,6 +328,61 @@ function dsLabel(d){
    community) contribute nothing but still count toward "offered in N". */
 function costOf(r){ return state.basis==="tax" ? num(r.ext_price_tax) : num(r.ext_price); }
 function cpsfOf(r){ return state.basis==="tax" ? num(r.cpsf_tax)      : num(r.cpsf); }
+
+/* ---------------- MONTH OVER MONTH ----------------
+   Two months rarely price the same set of homes: communities open, plans are
+   added, others stop being offered. Comparing each month's own average would
+   read that churn as a price movement. So a delta is computed only over the
+   rows present in BOTH months, matched on community + plan + elevation, and
+   the count of matched rows is reported alongside so a thin comparison is
+   visible as one. */
+function histKey(r){ return (r.comm_num||"")+"|"+(r.plan_no||"")+"|"+(r.elev||""); }
+function histUsable(r){
+  if(r.incomplete && !state.showIncomplete) return false;
+  return cpsfOf(r)!=null && costOf(r)!=null;
+}
+/* dataset -> plan_no -> Map(key -> row), built once per render pass. */
+let histIndex=null, histStamp="";
+function histBy(){
+  const stamp=state.basis+"|"+state.showIncomplete+"|"+state.hist.length;
+  if(histIndex && histStamp===stamp) return histIndex;
+  const idx=new Map();
+  state.hist.forEach(r=>{
+    if(!histUsable(r)) return;
+    let d=idx.get(r.dataset); if(!d){ d=new Map(); idx.set(r.dataset,d); }
+    let p=d.get(r.plan_no); if(!p){ p=new Map(); d.set(r.plan_no,p); }
+    p.set(histKey(r), r);
+  });
+  histIndex=idx; histStamp=stamp;
+  return idx;
+}
+/* Like-for-like movement for one plan between two datasets. */
+function planDelta(plan, from, to){
+  if(!from || !to || from===to) return null;
+  const idx=histBy();
+  const A=(idx.get(from)||new Map()).get(plan), B=(idx.get(to)||new Map()).get(plan);
+  if(!A||!B) return null;
+  const cpA=[],cpB=[],exA=[],exB=[];
+  A.forEach((ra,k)=>{ const rb=B.get(k); if(!rb) return;
+    cpA.push(cpsfOf(ra)); cpB.push(cpsfOf(rb)); exA.push(costOf(ra)); exB.push(costOf(rb)); });
+  if(!cpA.length) return null;
+  const a=mean(cpA), b=mean(cpB), xa=mean(exA), xb=mean(exB);
+  return { n:cpA.length, from:a, to:b, d:b-a, pct:a?(b-a)/a:null,
+           extFrom:xa, extTo:xb, extD:xb-xa, extPct:xa?(xb-xa)/xa:null,
+           basketFrom:A.size, basketTo:B.size };
+}
+/* Every dataset's average cost per sq ft for one plan — the line the chart
+   draws. Unlike the delta this is each month on its own terms, since a line
+   with a hole in it is worse than one whose basket shifts slightly. */
+function planSeriesOverTime(plan){
+  const idx=histBy();
+  return state.datasets.slice().sort().map(ds=>{
+    const p=(idx.get(ds)||new Map()).get(plan);
+    if(!p||!p.size) return { ds, cpsf:null, ext:null, n:0 };
+    const cp=[],ex=[]; p.forEach(r=>{ cp.push(cpsfOf(r)); ex.push(costOf(r)); });
+    return { ds, cpsf:mean(cp), ext:mean(ex), n:p.size };
+  });
+}
 function seriesOf(plan){ const p=state.plans[plan]; return (p&&p.series)||"LEGACY"; }
 function seriesLabel(k){ return SERIES_LABEL[k] || k; }
 
@@ -315,6 +435,7 @@ function planList(){
     e.status = st.size ? [...st.entries()].sort((a,b)=>b[1]-a[1])[0][0] : "";
     e.incomplete = e.rows.some(r=>r.incomplete);
     e.awaiting = e.rows.length===0;      // on the roster, not in this dataset
+    e.delta = planDelta(e.plan, state.cmp, state.dataset);
     out.push(e);
   });
   return out;
@@ -375,18 +496,38 @@ function filtered(all, except){
       if(v==null){ if(rngActive(s.key)) return false; continue; }
       if(v<r.lo-1e-9 || v>r.hi+1e-9) return false;
     }
-    if(q){
-      const hay=lc([p.plan,p.name,p.alias,seriesLabel(p.series),p.site,p.matrixComm,
-        ...p.rows.map(r=>r.community)].join(" "));
-      if(!hay.includes(q)) return false;
-    }
+    if(q && !matchesQuery(p,q)) return false;
     return true;
   });
+}
+/* A plan is searchable by its own number, its name, the older number it
+   replaced (`core_alias`), its series, homesite, and every community that
+   prices it. Matched literally and again with separators stripped, so the way
+   someone types a plan number doesn't decide whether they find it. */
+function planHay(p){
+  return [p.plan,p.name,p.alias,seriesLabel(p.series),p.site,p.matrixComm,
+          ...p.rows.map(r=>r.community), ...p.rows.map(r=>r.jde),
+          ...p.rows.map(r=>r.plan_name)].filter(Boolean).join(" ");
+}
+function matchesQuery(p,q){
+  const hay=planHay(p);
+  if(lc(hay).includes(lc(q))) return true;
+  const nq=norm(q);
+  return !!nq && norm(hay).includes(nq);
+}
+/* True when the query only found this plan through the number it used to
+   carry — worth saying out loud, since the row shows the new number. */
+function aliasHit(p,q){
+  if(!q||!p.alias) return false;
+  const nq=norm(q);
+  if(!nq || norm(p.plan).includes(nq) || norm(p.name||"").includes(nq)) return false;
+  return norm(p.alias).includes(nq);
 }
 function sortPlans(list){
   const d=state.sortDir;
   const key={ name:p=>lc(p.name||p.plan), plan:p=>p.plan, cpsf:p=>p.cpsf, ext:p=>p.ext,
-              price:p=>p.price, gm:p=>p.gmPct, sqft:p=>p.sqft, comms:p=>p.nComm
+              price:p=>p.price, gm:p=>p.gmPct, sqft:p=>p.sqft, comms:p=>p.nComm,
+              delta:p=>p.delta?p.delta.pct:null
             }[state.sort] || (p=>lc(p.name||p.plan));
   return list.slice().sort((a,b)=>{
     const x=key(a), y=key(b);
@@ -410,10 +551,13 @@ function render(){
   $("footMeta").textContent = state.rows.length
     ? `${dsLabel(state.dataset)} · ${state.rows.length.toLocaleString()} rows · ${state.basis==="tax"?"with tax":"untaxed"}`
     : "";
+  const tt=$("tTrend"); if(tt) tt.classList.toggle("hidden", state.datasets.length<2);
   const a=$("viewArea");
   if(!state.rows.length && !Object.keys(state.plans).length) return renderEmpty(a);
   if(state.view==="series") return renderSeries(a, all);
   if(state.view==="communities") return renderComms(a);
+  if(state.view==="trends") return renderTrends(a, all);
+  if(state.view==="codes") return renderCodes(a);
   renderPlans(a, all, list);
 }
 function renderEmpty(a){
@@ -463,6 +607,7 @@ function renderPlans(a, all, list){
         <div class="sortbar">
           <span class="hint">Sort</span>
           ${[["name","Plan"],["cpsf","Cost / sq ft"],["ext","Extended cost"],["price","Sales price"],["gm","Margin"],["sqft","Sq ft"],["comms","Communities"]]
+            .concat(state.cmp?[["delta","Change vs "+dsLabel(state.cmp)]]:[])
             .map(([k,l])=>`<button class="sortb${state.sort===k?" on":""}" data-sort="${k}">${l}${state.sort===k?`<i>${state.sortDir>0?"▲":"▼"}</i>`:""}</button>`).join("")}
         </div>
         <div id="planList"></div>
@@ -532,6 +677,7 @@ function renderPlans(a, all, list){
           <thead><tr><th class="c-plan">Plan</th><th class="c-sq">Sq ft</th><th class="c-bb">Bd / Ba</th>
             <th class="c-cp">Cost / sq ft</th><th class="c-ex">Extended cost</th>
             <th class="c-pr">Sales price</th><th class="c-gm">Margin</th>
+            ${state.cmp?`<th class="c-dl" title="Like-for-like change against ${esc(dsLabel(state.cmp))}">vs ${esc(dsShort(state.cmp))}</th>`:""}
             <th class="c-cm">Comms</th><th class="c-ch"></th></tr></thead>
           <tbody>${g.map(planRowHTML).join("")}</tbody>
         </table></section>`;
@@ -652,18 +798,19 @@ function planRowHTML(p){
     p.kind==="shell"?`<span class="pill">shell</span>`:"",
     p.origin==="inferred"?`<span class="pill inf" title="Series is a best guess, inferred from a neighbouring plan number — confirm before relying on it.">inferred</span>`:"",
     p.pending?`<span class="pill" title="Plan number not yet final">plan # TBD</span>`:"",
-    p.alias?`<span class="pill" title="Same home as plan ${esc(p.alias)}">= ${esc(p.alias)}</span>`:""
+    p.alias?`<span class="pill${aliasHit(p,state.q)?" hit":""}" title="Same home as plan ${esc(p.alias)}${
+      aliasHit(p,state.q)?" — which is what you searched for":""}">= ${esc(p.alias)}</span>`:""
   ].filter(Boolean).join(" ");
   const bb=[p.beds,p.baths].filter(Boolean).join(" / ")||"—";
   const st=p.status?`<span class="pill st-${esc(lc(p.status))}" title="${esc(STATUS[p.status]||p.status)}">${esc(p.status)}</span>`:"";
-  const NCOL=9;
+  const NCOL=state.cmp?10:9;
   if(p.awaiting){
     return `<tr class="prow await${open?" open":""}" data-plan="${esc(p.plan)}">
       <td class="c-plan"><span class="pno">${esc(p.plan)}</span>
         <span class="pnm">${esc(p.name||"—")}</span> ${tags}</td>
       <td class="c-sq">${sqftF(p.sqft)}</td>
       <td class="c-bb">${esc(bb)}</td>
-      <td class="c-cp await-t" colspan="5">awaiting pricing<span class="rng">${
+      <td class="c-cp await-t" colspan="${state.cmp?6:5}">awaiting pricing<span class="rng">${
         esc([p.matrixComm&&("earmarked for "+p.matrixComm), p.permit&&("permit: "+p.permit)].filter(Boolean).join(" · "))}</span></td>
       <td class="c-ch"><span class="chev">${open?"▾":"▸"}</span></td>
     </tr>` + (open?`<tr class="pdet"><td colspan="${NCOL}">${planDetailHTML(p)}</td></tr>`:"");
@@ -678,9 +825,20 @@ function planRowHTML(p){
       <td class="c-pr">${money(p.price)}</td>
       <td class="c-gm ${p.gmPct!=null&&p.gmPct<0.6?"gm-low":""}">${pctF(p.gmPct)}${
         p.gm!=null?`<span class="rng">${money(p.gm)}</span>`:""}</td>
+      ${state.cmp?`<td class="c-dl">${deltaCellHTML(p.delta)}</td>`:""}
       <td class="c-cm">${p.nComm}</td>
       <td class="c-ch"><span class="chev">${open?"▾":"▸"}</span></td>
     </tr>` + (open?`<tr class="pdet"><td colspan="${NCOL}">${planDetailHTML(p)}</td></tr>`:"");
+}
+/* A movement is only meaningful next to the number of homes it was measured
+   over, so the count rides along in the tooltip and, where the basket is thin,
+   on the face of the cell. */
+function deltaCellHTML(d){
+  if(!d) return `<span class="mute" title="No home priced in both months">—</span>`;
+  const dir=d.pct>0.0005?"up":d.pct<-0.0005?"down":"flat";
+  const tip=`${d.n} of ${d.basketTo} priced in both months · ${money2(d.from)} → ${money2(d.to)} / sq ft`;
+  return `<span class="dl ${dir}" title="${esc(tip)}">${signPct(d.pct)}
+      <span class="rng">${signMoney2(d.d)} / sf</span></span>`;
 }
 function planDetailHTML(p){
   const rows=p.rows.slice().sort((a,b)=>String(a.community).localeCompare(b.community)||String(a.elev).localeCompare(b.elev));
@@ -693,8 +851,9 @@ function planDetailHTML(p){
       p.matrixComm?` — earmarked for ${esc(p.matrixComm)}`:""}.</div></div>`;
   return `<div class="det">
     ${meta?`<div class="detmeta">${esc(meta)}</div>`:""}
+    ${planTrendHTML(p)}
     <table class="dt"><thead><tr><th>Community</th><th>JDE</th><th>Elev</th><th>Sq ft</th>
-      <th>Cost / sq ft</th><th>Extended cost</th><th>Sales price</th><th>Margin</th><th>Status</th></tr></thead>
+      <th>Cost / sq ft</th><th>Extended cost</th><th>Sales price</th><th>Margin</th><th>Status</th><th></th></tr></thead>
       <tbody>${rows.map(r=>{
         const cp=cpsfOf(r), ex=costOf(r), pr=num(r.base_price);
         const gm=(pr&&ex)?(pr-ex)/pr:null;
@@ -702,11 +861,49 @@ function planDetailHTML(p){
           <td>${esc(r.community||"—")}</td><td class="mono">${esc(r.jde||"")}</td>
           <td>${esc(r.elev||"—")}</td><td>${sqftF(num(r.sqft))}</td>
           <td>${money2(cp)}</td><td>${money(ex)}</td><td>${money(pr)}</td><td>${pctF(gm)}</td>
-          <td>${esc(r.status||"—")}${r.incomplete?` <span class="pill warn">incomplete</span>`:""}</td></tr>`;
+          <td>${esc(r.status||"—")}${r.incomplete?` <span class="pill warn">incomplete</span>`:""}</td>
+          <td class="c-cis">${cisBtnHTML(r.jde, r.community)}</td></tr>`;
       }).join("")}</tbody></table>
     ${optionsHTML(p)}
     ${costCodeHTML(p)}
     </div>`;
+}
+
+/* ---- link out to the community's CIS ----
+   Same origin and the same shared session as this app, so the link lands
+   inside the record rather than on a sign-in screen. The JDE number is what
+   both apps key a community on. Hidden entirely when no sibling app is
+   configured, rather than rendering a button that goes nowhere. */
+function cisHref(jde){
+  const base=CFG.COMMUNITY_DB_URL;
+  if(!base || !jde) return "";
+  return base + (base.endsWith("/")?"":"/") + "#jde=" + encodeURIComponent(String(jde).trim());
+}
+function cisBtnHTML(jde, name){
+  const href=cisHref(jde);
+  if(!href) return "";
+  return `<a class="cisbtn" href="${esc(href)}" target="_blank" rel="noopener"
+    title="Open ${esc(name||"this community")} in Community-DB">View CIS</a>`;
+}
+
+/* ---- how this plan has moved, month by month ---- */
+function planTrendHTML(p){
+  if(state.datasets.length<2) return "";
+  const pts=planSeriesOverTime(p.plan);
+  if(pts.filter(x=>x.cpsf!=null).length<2) return "";
+  const d=p.delta;
+  const head=d
+    ? `<span class="hint">${signPct(d.pct)} · ${signMoney2(d.d)} / sq ft vs ${esc(dsLabel(state.cmp))}
+        <span class="tiny">(${d.n} home${d.n===1?"":"s"} priced in both)</span></span>`
+    : `<span class="hint">no home priced in both months</span>`;
+  return `<div class="detsec">
+    <div class="detsec-h">Cost per sq ft over time ${head}</div>
+    ${lineChart({
+      labels: pts.map(x=>dsShort(x.ds)),
+      lines: [{ label:p.name||p.plan, color:"var(--blue-600)", points:pts.map(x=>x.cpsf) }],
+      fmtY: money2, height:150, legend:false
+    })}
+  </div>`;
 }
 
 /* Options priced against this plan. '1BASE' is the base package, not an add, so
@@ -819,27 +1016,474 @@ function wireFilterNote(){
   b.onclick=clearAllFilters;
 }
 
+/* ---------------- COMMUNITY COST INDEX ----------------
+   A community's raw average cost per sq ft says more about which plans it
+   happens to sell than about the community: a place that only builds large
+   two-storey homes will look cheap per foot whatever it pays its trades.
+
+   The index removes that. Each home is compared against what the SAME plan
+   costs averaged across every community offering it that month, and the
+   community's index is the average of those ratios, expressed as 100 = par.
+   106 means this community pays about 6% over the division for the same
+   houses. A plan built in only one community tells us nothing — it would be
+   its own benchmark — so it is left out, and the number of plans that did
+   count is shown so a thin index reads as one. */
+const IDX_MIN_PLANS=3;
+function communityIndex(){
+  const usable=state.rows.filter(r=>
+    cpsfOf(r)!=null && !r.incomplete && r.kind!=="shell" && (r.comm_num||r.community));
+  // benchmark: mean cost per sq ft for each plan across the communities offering it
+  const planComm=new Map();          // plan -> Map(comm -> [cpsf])
+  usable.forEach(r=>{
+    let m=planComm.get(r.plan_no); if(!m){ m=new Map(); planComm.set(r.plan_no,m); }
+    const k=r.comm_num||r.community;
+    (m.get(k)||m.set(k,[]).get(k)).push(cpsfOf(r));
+  });
+  const bench=new Map();             // plan -> {mean, nComm}
+  planComm.forEach((m,plan)=>{
+    const per=[...m.values()].map(mean);
+    if(per.length<2) return;         // single-community plan is its own benchmark
+    bench.set(plan,{ mean:mean(per), nComm:per.length });
+  });
+  const by=new Map();
+  usable.forEach(r=>{
+    const k=r.comm_num||r.community;
+    let e=by.get(k);
+    if(!e){ e={ key:k, num:r.comm_num, jde:r.jde, name:r.community,
+                plans:new Set(), cp:[], ex:[], ratios:[], detail:[] }; by.set(k,e); }
+    e.plans.add(r.plan_no);
+    e.cp.push(cpsfOf(r)); const x=costOf(r); if(x!=null) e.ex.push(x);
+  });
+  // one ratio per plan per community, so a plan with six elevations doesn't
+  // outvote a plan with one
+  by.forEach(e=>{
+    const perPlan=new Map();
+    usable.filter(r=>(r.comm_num||r.community)===e.key)
+      .forEach(r=>{ (perPlan.get(r.plan_no)||perPlan.set(r.plan_no,[]).get(r.plan_no)).push(cpsfOf(r)); });
+    perPlan.forEach((v,plan)=>{
+      const b=bench.get(plan); if(!b||!b.mean) return;
+      const here=mean(v), ratio=here/b.mean;
+      e.ratios.push(ratio);
+      e.detail.push({ plan, name:(state.plans[plan]&&state.plans[plan].name)||"", here, bench:b.mean, ratio, nComm:b.nComm });
+    });
+    e.detail.sort((x,y)=>y.ratio-x.ratio);
+    e.index = e.ratios.length>=IDX_MIN_PLANS ? mean(e.ratios)*100 : null;
+  });
+  // every community that priced anything, including ones with too few shared plans
+  state.rows.forEach(r=>{
+    const k=r.comm_num||r.community; if(!k||by.has(k)) return;
+    by.set(k,{ key:k, num:r.comm_num, jde:r.jde, name:r.community,
+               plans:new Set(state.rows.filter(x=>(x.comm_num||x.community)===k).map(x=>x.plan_no)),
+               cp:[], ex:[], ratios:[], detail:[], index:null });
+  });
+  return [...by.values()];
+}
+function idxClass(v){
+  if(v==null) return "";
+  if(v>=103) return "over";
+  if(v<=97)  return "under";
+  return "par";
+}
 /* ---- communities overview ---- */
 function renderComms(a){
-  const by=new Map();
-  state.rows.forEach(r=>{
-    const k=r.comm_num||r.community; if(!k) return;
-    let e=by.get(k);
-    if(!e){ e={num:r.comm_num,jde:r.jde,name:r.community,plans:new Set(),cp:[],ex:[]}; by.set(k,e); }
-    e.plans.add(r.plan_no);
-    const c=cpsfOf(r), x=costOf(r);
-    if(c!=null && !r.incomplete && r.kind!=="shell"){ e.cp.push(c); e.ex.push(x); }
-  });
-  const list=[...by.values()].sort((x,y)=>String(x.name).localeCompare(y.name));
-  const avg=v=>v.length?v.reduce((a,b)=>a+b,0)/v.length:null;
-  a.innerHTML=`<div class="panel"><table class="pt ct">
-    <thead><tr><th>Community</th><th>JDE</th><th>Plans</th><th>Avg cost / sq ft</th><th>Avg extended cost</th></tr></thead>
-    <tbody>${list.map(c=>`<tr class="crow" data-comm="${esc(c.name||"")}">
-      <td><b>${esc(c.name||"—")}</b></td><td class="mono">${esc(c.jde||"")}</td>
-      <td>${c.plans.size}</td><td>${c.cp.length?money2(avg(c.cp)):"—"}</td>
-      <td>${c.ex.length?money(avg(c.ex)):"—"}</td></tr>`).join("")}</tbody></table></div>`;
+  const list=communityIndex().sort((x,y)=>String(x.name).localeCompare(y.name));
+  const scored=list.filter(c=>c.index!=null);
+  const spread=scored.length
+    ? `${scored.length} communities indexed · ${(Math.min(...scored.map(c=>c.index))).toFixed(0)}–${(Math.max(...scored.map(c=>c.index))).toFixed(0)}`
+    : "not enough shared plans to index";
+  a.innerHTML=`<div class="panel">
+    <div class="secbar">
+      <span class="sectitle">Communities</span>
+      <span class="hint">Index compares each community against what the same plans cost division-wide. 100 = par. ${esc(spread)}.</span>
+    </div>
+    <table class="pt ct">
+    <thead><tr><th>Community</th><th>JDE</th><th>Plans</th><th>Avg cost / sq ft</th>
+      <th>Avg extended cost</th><th class="c-ix">Cost index</th><th class="c-cis"></th><th class="c-ch"></th></tr></thead>
+    <tbody>${list.map(c=>{
+      const open=!!state.openComm[c.key];
+      return `<tr class="crow${open?" open":""}" data-comm="${esc(c.key)}">
+        <td><b>${esc(c.name||"—")}</b></td><td class="mono">${esc(c.jde||"")}</td>
+        <td>${c.plans.size}</td><td>${c.cp.length?money2(mean(c.cp)):"—"}</td>
+        <td>${c.ex.length?money(mean(c.ex)):"—"}</td>
+        <td class="c-ix">${indexCellHTML(c)}</td>
+        <td class="c-cis">${cisBtnHTML(c.jde, c.name)}</td>
+        <td class="c-ch"><span class="chev">${open?"▾":"▸"}</span></td></tr>`
+        + (open?`<tr class="pdet"><td colspan="8">${commDetailHTML(c)}</td></tr>`:"");
+    }).join("")}</tbody></table></div>`;
+  // the CIS link is a real anchor inside a clickable row — let it navigate
+  a.querySelectorAll(".cisbtn").forEach(el=>el.onclick=e=>e.stopPropagation());
   a.querySelectorAll("[data-comm]").forEach(tr=>tr.onclick=()=>{
-    state.q=tr.dataset.comm; state.view="plans"; setTab(); render(); });
+    const k=tr.dataset.comm; state.openComm[k]=!state.openComm[k]; renderComms(a); });
+  a.querySelectorAll("[data-goplan]").forEach(el=>el.onclick=e=>{
+    e.stopPropagation(); state.q=el.dataset.goplan; state.view="plans"; setTab(); render(); });
+}
+function indexCellHTML(c){
+  if(c.index==null)
+    return `<span class="mute" title="Needs at least ${IDX_MIN_PLANS} plans that are also built elsewhere">—</span>`;
+  const off=c.index-100;
+  const w=Math.min(100, Math.abs(off)*5);      // ±20% fills the bar
+  return `<span class="ixw ${idxClass(c.index)}" title="${esc(c.ratios.length+" plans compared")}">
+      <b>${c.index.toFixed(0)}</b>
+      <span class="ixbar"><i style="width:${w.toFixed(1)}%;${off<0?"right:50%":"left:50%"}"></i></span>
+      <span class="rng">${signPct(off/100)}</span></span>`;
+}
+function commDetailHTML(c){
+  if(!c.detail.length) return `<div class="det"><div class="empty" style="padding:14px">
+    None of this community's plans is built anywhere else this month, so there is nothing to compare it against.</div></div>`;
+  return `<div class="det"><div class="detsec-h">Plan by plan
+      <span class="hint">what each plan costs here against its division-wide average</span></div>
+    <table class="dt"><thead><tr><th>Plan</th><th>Built in</th><th>Here</th><th>Division avg</th><th>Difference</th></tr></thead>
+    <tbody>${c.detail.map(d=>`<tr>
+      <td><a class="plink" data-goplan="${esc(d.plan)}">${esc(d.plan)}</a> ${esc(d.name||"")}</td>
+      <td>${d.nComm} communities</td>
+      <td>${money2(d.here)}</td><td>${money2(d.bench)}</td>
+      <td class="${d.ratio>1.03?"dl up":d.ratio<0.97?"dl down":"dl flat"}">${signPct(d.ratio-1)}</td></tr>`).join("")}
+    </tbody></table></div>`;
+}
+
+/* ---------------- LINE CHART ----------------
+   Hand-drawn SVG rather than a charting library: it is a couple of dozen
+   lines, it inherits the theme's colours through CSS variables, and it adds
+   nothing to what the page has to download.
+
+   The viewBox scales to the container, so the geometry below is in chart
+   units, not pixels. A null point breaks the line rather than being drawn as
+   zero — a month a plan wasn't priced is a gap, not a collapse in cost. */
+const CHART_COLORS=["#0064d2","#e07a1f","#1a8f57","#b3261e","#7a4bc4",
+                    "#0f9bb5","#c2185b","#6b7a3a","#8d6e63","#3f51b5"];
+function lineChart(o){
+  const W=o.width||760, H=o.height||260;
+  const padL=o.padL||54, padR=16, padT=12, padB=o.legend===false?22:26;
+  const labels=o.labels||[];
+  const lines=(o.lines||[]).filter(l=>l.points && l.points.some(v=>v!=null));
+  const fmtY=o.fmtY||(v=>String(v));
+  if(!lines.length || !labels.length)
+    return `<div class="empty" style="padding:18px">Nothing to chart yet.</div>`;
+
+  const vals=[]; lines.forEach(l=>l.points.forEach(v=>{ if(v!=null) vals.push(v); }));
+  let lo=Math.min(...vals), hi=Math.max(...vals);
+  if(!(hi>lo)){ const p=Math.abs(hi||1)*0.05||1; lo=hi-p; hi=hi+p; }
+  else { const p=(hi-lo)*0.12; lo-=p; hi+=p; }
+  const X=i=> labels.length===1 ? padL+(W-padL-padR)/2
+                                : padL + i*(W-padL-padR)/(labels.length-1);
+  const Y=v=> padT + (1-(v-lo)/(hi-lo))*(H-padT-padB);
+
+  const TICKS=4;
+  let grid="";
+  for(let t=0;t<=TICKS;t++){
+    const v=lo+(hi-lo)*t/TICKS, y=Y(v).toFixed(2);
+    grid+=`<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" class="ch-grid"/>`
+        + `<text x="${padL-8}" y="${y}" class="ch-yl">${esc(fmtY(v))}</text>`;
+  }
+  const xl=labels.map((l,i)=>
+    `<text x="${X(i).toFixed(2)}" y="${H-6}" class="ch-xl">${esc(l)}</text>`).join("");
+
+  const body=lines.map((l,li)=>{
+    const col=l.color||CHART_COLORS[li%CHART_COLORS.length];
+    // split into runs of consecutive present values so gaps stay gaps
+    const runs=[]; let cur=[];
+    l.points.forEach((v,i)=>{ if(v==null){ if(cur.length) runs.push(cur); cur=[]; } else cur.push([i,v]); });
+    if(cur.length) runs.push(cur);
+    const paths=runs.filter(r=>r.length>1).map(r=>
+      `<path d="${r.map(([i,v],k)=>(k?"L":"M")+X(i).toFixed(2)+" "+Y(v).toFixed(2)).join(" ")}"
+         fill="none" stroke="${col}" stroke-width="${l.width||2.2}" stroke-linecap="round"
+         stroke-linejoin="round"${l.dash?` stroke-dasharray="${l.dash}"`:""}/>`).join("");
+    const dots=runs.flat().map(([i,v])=>
+      `<circle cx="${X(i).toFixed(2)}" cy="${Y(v).toFixed(2)}" r="${l.width>2.5?4:3.2}"
+         fill="${col}"><title>${esc(labels[i]+" · "+(l.label||"")+" · "+fmtY(v))}</title></circle>`).join("");
+    return paths+dots;
+  }).join("");
+
+  const legend = o.legend===false ? "" :
+    `<div class="ch-legend">${lines.map((l,li)=>
+      `<span class="ch-key"><i style="background:${l.color||CHART_COLORS[li%CHART_COLORS.length]}"></i>${esc(l.label||"")}</span>`
+     ).join("")}</div>`;
+
+  return `<div class="chart">
+    <svg viewBox="0 0 ${W} ${H}" class="ch" role="img"
+         aria-label="${esc(o.alt||"Line chart")}">${grid}${xl}${body}</svg>
+    ${legend}</div>`;
+}
+
+/* ---------------- TRENDS ----------------
+   Two months of the same homes is a price movement. Two months of different
+   homes is a change in what we happened to price. The like-for-like toggle
+   decides which question the chart answers, and defaults to the first. */
+function trendBasket(){
+  const idx=histBy(), dss=state.datasets;
+  if(dss.length<2) return null;
+  const sets=dss.map(ds=>{
+    const s=new Set();
+    (idx.get(ds)||new Map()).forEach(p=>p.forEach((r,k)=>s.add(k)));
+    return s;
+  });
+  return new Set([...sets[0]].filter(k=>sets.every(s=>s.has(k))));
+}
+function trendData(lfl){
+  const idx=histBy();
+  const dss=state.datasets.slice().sort();
+  const keep=lfl?trendBasket():null;
+  const out={ ds:dss, all:dss.map(()=>null), n:dss.map(()=>0), bySeries:{} };
+  dss.forEach((ds,i)=>{
+    const bucket={}, allv=[];
+    (idx.get(ds)||new Map()).forEach((p,plan)=>{
+      const sk=seriesOf(plan);
+      p.forEach((r,k)=>{
+        if(keep && !keep.has(k)) return;
+        if(r.kind==="shell" && !state.showShells) return;
+        const v=cpsfOf(r); if(v==null) return;
+        (bucket[sk]=bucket[sk]||[]).push(v); allv.push(v);
+      });
+    });
+    out.all[i]=mean(allv); out.n[i]=allv.length;
+    Object.keys(bucket).forEach(sk=>{
+      const arr = out.bySeries[sk] || (out.bySeries[sk]=dss.map(()=>null));
+      arr[i]=mean(bucket[sk]);
+    });
+  });
+  return out;
+}
+function renderTrends(a, all){
+  if(state.datasets.length<2){
+    a.innerHTML=`<div class="panel"><div class="empty" style="padding:34px;text-align:center">
+      Only one month is loaded, so there is nothing to trend yet. Load a second month to see movement.</div></div>`;
+    return;
+  }
+  const t=trendData(state.trendLFL);
+  const keys=Object.keys(t.bySeries)
+    .sort((x,y)=>(SERIES_ORDER.indexOf(x)<0?99:SERIES_ORDER.indexOf(x))-(SERIES_ORDER.indexOf(y)<0?99:SERIES_ORDER.indexOf(y)));
+  if(!state.trendTouched){
+    // seed with the series that cover the most homes, so the chart says
+    // something on arrival instead of showing a single line
+    const size=k=>t.bySeries[k].filter(v=>v!=null).length*1000 +
+                  all.filter(p=>p.series===k && !p.awaiting).length;
+    keys.slice().sort((x,y)=>size(y)-size(x)).slice(0,5).forEach(k=>{ state.trendSeries[k]=true; });
+  }
+  const lines=[{ label:"All plans", color:"var(--navy)", width:3.2, points:t.all }]
+    .concat(keys.filter(k=>state.trendSeries[k]).map((k,i)=>({
+      label:seriesLabel(k), points:t.bySeries[k],
+      color:CHART_COLORS[keys.indexOf(k)%CHART_COLORS.length] })));
+
+  const first=t.all.find(v=>v!=null), last=[...t.all].reverse().find(v=>v!=null);
+  const overall=(first!=null&&last!=null&&first)?(last-first)/first:null;
+  const movers=moverRows(all);
+  /* How many homes the line is drawn from. Like-for-like makes every month the
+     same basket, so one number says it; without it the months differ and a
+     single number would quietly pick one. */
+  const nLo=Math.min(...t.n), nHi=Math.max(...t.n);
+  const basket = nLo===nHi ? `${nLo.toLocaleString()} homes`
+                           : `${nLo.toLocaleString()}–${nHi.toLocaleString()} homes per month`;
+
+  a.innerHTML=`
+    <div class="panel">
+      <div class="secbar">
+        <span class="sectitle">Cost per sq ft over time</span>
+        <span class="hint">${esc(state.basis==="tax"?"with tax":"untaxed")} ·
+          ${overall!=null?`${signPct(overall)} across ${esc(dsShort(t.ds[0]))} → ${esc(dsShort(t.ds[t.ds.length-1]))}`:"—"} ·
+          ${esc(basket)} in the basket</span>
+        <span class="spacer"></span>
+        <label class="hint chk" title="Chart only the homes priced in every loaded month, so the line shows price movement rather than a change in what was priced">
+          <input type="checkbox" id="chkLFL" ${state.trendLFL?"checked":""}> Like-for-like only</label>
+      </div>
+      ${lineChart({ labels:t.ds.map(dsShort), lines, fmtY:money2, height:280,
+                    alt:"Average cost per square foot by month" })}
+      <div class="serpicks">
+        <span class="hint">Series lines</span>
+        ${keys.map((k,i)=>`<button class="serpick${state.trendSeries[k]?" on":""}" data-sp="${esc(k)}">
+          <i style="background:${CHART_COLORS[i%CHART_COLORS.length]}"></i>${esc(seriesLabel(k))}</button>`).join("")}
+        <button class="linkbtn2" id="spNone">Clear</button>
+      </div>
+    </div>
+    ${movers}`;
+
+  $("chkLFL").onchange=e=>{ state.trendLFL=e.target.checked; renderTrends(a,all); };
+  a.querySelectorAll("[data-sp]").forEach(b=>b.onclick=()=>{
+    const k=b.dataset.sp; state.trendTouched=true;
+    state.trendSeries[k]=!state.trendSeries[k]; renderTrends(a,all); });
+  $("spNone").onclick=()=>{ state.trendTouched=true; state.trendSeries={}; renderTrends(a,all); };
+  a.querySelectorAll("[data-goplan]").forEach(el=>el.onclick=()=>{
+    state.q=el.dataset.goplan; state.view="plans"; setTab(); render(); });
+}
+/* The plans that moved most between the two chosen months. A movement over a
+   single home is noise, so the table says how many homes each one covers and
+   sorts by size of move, not by significance — the reader can see both. */
+function moverRows(all){
+  if(!state.cmp) return "";
+  const withD=all.filter(p=>p.delta && p.delta.n>0);
+  if(!withD.length) return "";
+  const byPct=withD.slice().sort((a,b)=>b.delta.pct-a.delta.pct);
+  const up=byPct.slice(0,8), down=byPct.slice(-8).reverse();
+  const tbl=(title,rows,note)=>`<div class="panel half">
+    <div class="secbar"><span class="sectitle">${esc(title)}</span><span class="hint">${esc(note)}</span></div>
+    <table class="pt ct"><thead><tr><th>Plan</th><th>Homes</th><th>${esc(dsShort(state.cmp))}</th>
+      <th>${esc(dsShort(state.dataset))}</th><th>Change</th></tr></thead>
+    <tbody>${rows.map(p=>`<tr>
+      <td><a class="plink" data-goplan="${esc(p.plan)}">${esc(p.plan)}</a> ${esc(p.name||"")}</td>
+      <td>${p.delta.n}</td><td>${money2(p.delta.from)}</td><td>${money2(p.delta.to)}</td>
+      <td class="dl ${p.delta.pct>0?"up":p.delta.pct<0?"down":"flat"}">${signPct(p.delta.pct)}</td></tr>`).join("")}
+    </tbody></table></div>`;
+  return `<div class="twoup">
+    ${tbl("Biggest increases", up, "like-for-like, cost per sq ft")}
+    ${tbl("Biggest decreases", down, "like-for-like, cost per sq ft")}</div>`;
+}
+
+/* ---------------- COST CODE VARIANCE ----------------
+   Aggregated in the database, not here: a month is tens of thousands of
+   cost-code rows and paging them into the browser to average them would be
+   slow and pointless. If the functions aren't installed the view says so
+   rather than failing silently. */
+async function loadCcVariance(){
+  if(state.ccv || state.ccvBusy) return;
+  if(DEMO||!sb||!state.dataset){ state.ccv=[]; return; }
+  state.ccvBusy=true; state.ccvErr=null;
+  try{
+    const { data,error } = await sb.rpc("pdb_cc_variance",
+      { p_dataset:state.dataset, p_prev:state.cmp||null, p_division:CFG.DIVISION.key });
+    if(error) throw error;
+    state.ccv=data||[];
+  }catch(e){
+    console.error(e);
+    state.ccv=[]; state.ccvErr=(e&&e.message)||"Could not load cost-code aggregates.";
+  }finally{ state.ccvBusy=false; }
+}
+async function loadCcCode(code){
+  if(state.ccd[code] || state.ccdBusy[code]) return;
+  if(DEMO||!sb){ state.ccd[code]=[]; return; }
+  state.ccdBusy[code]=true;
+  try{
+    const { data,error } = await sb.rpc("pdb_cc_code_plans",
+      { p_dataset:state.dataset, p_code:code, p_division:CFG.DIVISION.key });
+    if(error) throw error;
+    state.ccd[code]=data||[];
+  }catch(e){ console.error(e); state.ccd[code]=[]; }
+  finally{ state.ccdBusy[code]=false; }
+}
+const CC_SORTS=[
+  ["spread","Widest disagreement"],
+  ["cv","Most inconsistent"],
+  ["avg","Largest cost"],
+  ["move","Biggest movement"]
+];
+function ccSortKey(r){
+  const avg=num(r.avg_cpsf)||0;
+  if(state.ccSort==="avg")    return avg;
+  if(state.ccSort==="cv")     return avg ? (num(r.sd_cpsf)||0)/avg : 0;
+  if(state.ccSort==="move")   return (r.prev_avg!=null && num(r.prev_avg)) ? Math.abs((avg-num(r.prev_avg))/num(r.prev_avg)) : -1;
+  return num(r.spread)||0;
+}
+function renderCodes(a){
+  if(state.ccv===null && !state.ccvBusy){
+    const pending=loadCcVariance();
+    a.innerHTML=`<div class="panel"><div class="empty" style="padding:34px;text-align:center">Loading cost-code aggregates…</div></div>`;
+    pending.then(()=>{ if(state.view==="codes") renderCodes(a); });
+    return;
+  }
+  if(state.ccvBusy){
+    a.innerHTML=`<div class="panel"><div class="empty" style="padding:34px;text-align:center">Loading cost-code aggregates…</div></div>`;
+    return;
+  }
+  if(state.ccvErr){
+    a.innerHTML=`<div class="panel"><div class="empty" style="padding:34px;text-align:center">
+      <h3 style="margin:0 0 8px;color:var(--navy)">Cost-code analysis isn't available</h3>
+      <p class="tiny" style="max-width:560px;margin:0 auto">Run <code>analytics_rpc.sql</code> in the Supabase SQL editor for
+      this project, then reload. The aggregation runs in the database because a month holds far more
+      cost-code rows than a browser should download.</p>
+      <p class="tiny" style="margin-top:10px;opacity:.75">${esc(state.ccvErr)}</p></div></div>`;
+    return;
+  }
+  const rows=(state.ccv||[]).slice().sort((x,y)=>ccSortKey(y)-ccSortKey(x));
+  if(!rows.length){
+    a.innerHTML=`<div class="panel"><div class="empty" style="padding:34px;text-align:center">
+      No cost-code detail loaded for ${esc(dsLabel(state.dataset))}.</div></div>`;
+    return;
+  }
+  // its own search box: the plans search is a filter that persists across tabs,
+  // and borrowing it here would silently narrow the plans list on the way back
+  const q=lc(state.ccq||"").trim();
+  const shown=q?rows.filter(r=>lc((r.code||"")+" "+(r.description||"")).includes(q)):rows;
+  const maxSpread=Math.max(...rows.map(r=>num(r.spread)||0), 0.0001);
+  a.innerHTML=`
+    <div class="bar">
+      <input type="search" id="qcc" placeholder="Search cost code or description…" value="${esc(state.ccq||"")}">
+      <span class="hint">${shown.length} of ${rows.length} codes · ${esc(dsLabel(state.dataset))} · untaxed</span>
+      <span class="spacer"></span>
+      <span class="hint">Sort</span>
+      ${CC_SORTS.map(([k,l])=>`<button class="sortb${state.ccSort===k?" on":""}" data-ccsort="${k}">${l}</button>`).join("")}
+    </div>
+    <div class="panel">
+      <div class="secbar"><span class="hint">
+        <b>Disagreement</b> is how far apart two communities price the same code on the same plan, averaged over the plans that carry it —
+        the part of the variation that isn't explained by plans being different sizes.
+        <b>Inconsistency</b> is that spread relative to the code's own size, so a small code with wild swings ranks alongside a big one.
+      </span></div>
+      <table class="pt cvt">
+      <thead><tr><th>Code</th><th>Description</th><th>Avg / sq ft</th><th>Range</th>
+        <th>Disagreement</th><th>Inconsistency</th>
+        ${state.cmp?`<th>vs ${esc(dsShort(state.cmp))}</th>`:""}
+        <th>Plans</th><th class="c-ch"></th></tr></thead>
+      <tbody>${shown.map(r=>ccRowHTML(r,maxSpread)).join("")}</tbody></table>
+    </div>`;
+  $("qcc").addEventListener("input",e=>{
+    state.ccq=e.target.value;
+    const at=e.target.selectionStart;
+    renderCodes(a);
+    const box=$("qcc"); if(box){ box.focus(); try{ box.setSelectionRange(at,at); }catch(err){} }
+  });
+  a.querySelectorAll("[data-ccsort]").forEach(b=>b.onclick=()=>{ state.ccSort=b.dataset.ccsort; renderCodes(a); });
+  a.querySelectorAll("[data-code]").forEach(tr=>tr.onclick=async ()=>{
+    const c=tr.dataset.code;
+    state.openCode[c]=!state.openCode[c];
+    if(state.openCode[c] && !state.ccd[c]){
+      const pending=loadCcCode(c);
+      renderCodes(a); await pending;
+      if(state.view==="codes") renderCodes(a);
+      return;
+    }
+    renderCodes(a);
+  });
+  a.querySelectorAll("[data-goplan]").forEach(el=>el.onclick=e=>{
+    e.stopPropagation(); state.q=el.dataset.goplan; state.view="plans"; setTab(); render(); });
+}
+function ccRowHTML(r, maxSpread){
+  const avg=num(r.avg_cpsf), sd=num(r.sd_cpsf)||0, sp=num(r.spread);
+  const cv=avg?sd/avg:null;
+  const prev=num(r.prev_avg);
+  const mv=(prev!=null&&prev)?(avg-prev)/prev:null;
+  const open=!!state.openCode[r.code];
+  const NCOL=state.cmp?9:8;
+  return `<tr class="crow${open?" open":""}" data-code="${esc(r.code)}">
+    <td class="mono"><b>${esc(r.code)}</b></td>
+    <td>${esc(r.description||"—")}</td>
+    <td>${money2(avg)}</td>
+    <td class="rng2">${money2(num(r.min_cpsf))}–${money2(num(r.max_cpsf))}</td>
+    <td class="c-sp">${sp!=null?`<span class="spw"><b>${money2(sp)}</b>
+        <span class="spbar"><i style="width:${(Math.min(1,sp/maxSpread)*100).toFixed(1)}%"></i></span></span>`:"—"}</td>
+    <td>${cv!=null?`<span class="${cv>0.35?"dl up":""}">${pctF(cv)}</span>`:"—"}</td>
+    ${state.cmp?`<td class="${mv==null?"":mv>0.005?"dl up":mv<-0.005?"dl down":"dl flat"}">${mv==null?"—":signPct(mv)}</td>`:""}
+    <td>${r.n_plans}</td>
+    <td class="c-ch"><span class="chev">${open?"▾":"▸"}</span></td></tr>`
+    + (open?`<tr class="pdet"><td colspan="${NCOL}">${ccDetailHTML(r)}</td></tr>`:"");
+}
+function ccDetailHTML(r){
+  if(state.ccdBusy[r.code]) return `<div class="det"><div class="hint" style="padding:10px 0">Loading…</div></div>`;
+  const rows=state.ccd[r.code];
+  if(!rows) return `<div class="det"><div class="hint" style="padding:10px 0">Open again to load.</div></div>`;
+  if(!rows.length) return `<div class="det"><div class="empty" style="padding:14px">No plan detail for this code.</div></div>`;
+  const top=rows.slice(0,25);
+  return `<div class="det"><div class="detsec-h">${esc(r.code)} plan by plan
+      <span class="hint">widest disagreement between communities first</span></div>
+    <table class="dt"><thead><tr><th>Plan</th><th>Communities</th><th>Avg</th>
+      <th>Cheapest</th><th>Dearest</th><th>Gap</th></tr></thead>
+    <tbody>${top.map(d=>{
+      const lo=num(d.min_cpsf), hi=num(d.max_cpsf), gap=(lo!=null&&hi!=null)?hi-lo:null;
+      const nm=(state.plans[d.plan_no]&&state.plans[d.plan_no].name)||"";
+      return `<tr><td><a class="plink" data-goplan="${esc(d.plan_no)}">${esc(d.plan_no)}</a> ${esc(nm)}</td>
+        <td>${d.n_comms}</td><td>${money2(num(d.avg_cpsf))}</td>
+        <td>${money2(lo)}<span class="rng">${esc(d.lo_comm||"")}</span></td>
+        <td>${money2(hi)}<span class="rng">${esc(d.hi_comm||"")}</span></td>
+        <td>${gap!=null?money2(gap):"—"}</td></tr>`;
+    }).join("")}</tbody></table>
+    ${rows.length>top.length?`<div class="hint" style="padding:8px 0 0">+ ${rows.length-top.length} more plans</div>`:""}</div>`;
 }
 
 /* ---------------- 2-point range slider ----------------
@@ -897,15 +1541,21 @@ function scheduleRepaint(){
 function exportPlans(list){
   if(!window.XLSX){ uiAlert("Spreadsheet library didn't load — refresh and try again.","Export"); return; }
   const basis=state.basis==="tax"?"with tax":"untaxed";
-  const head=["Series","Series source","Homesite","Tier","Plan #","Plan name","Sq ft","Beds","Baths","Levels","Footprint",
+  const cmp=state.cmp;
+  const head=["Series","Series source","Homesite","Tier","Plan #","Plan name","Also known as","Sq ft","Beds","Baths","Levels","Footprint",
               `Avg cost/sq ft (${basis})`,`Min cost/sq ft`,`Max cost/sq ft`,
               `Avg extended cost (${basis})`,`Min extended`,`Max extended`,
               "Avg sales price","Min price","Max price","Gross margin $","Gross margin %",
-              "Plan status","Communities","Kind","Availability"];
-  const body=list.map(p=>[seriesLabel(p.series),p.origin,p.site,p.tier,p.plan,p.name,p.sqft,p.beds,p.baths,p.sty,p.footprint,
-    p.cpsf,p.cpsfLo,p.cpsfHi,p.ext,p.extLo,p.extHi,
-    p.price,p.priceLo,p.priceHi,p.gm,p.gmPct,
-    STATUS[p.status]||p.status,p.nComm,p.kind,p.awaiting?"awaiting pricing":""]);
+              "Plan status","Communities","Kind","Availability"]
+    .concat(cmp?[`${dsLabel(cmp)} cost/sq ft`,`Change $/sq ft`,`Change %`,`Change extended $`,"Homes compared"]:[]);
+  const body=list.map(p=>{
+    const d=p.delta;
+    return [seriesLabel(p.series),p.origin,p.site,p.tier,p.plan,p.name,p.alias,p.sqft,p.beds,p.baths,p.sty,p.footprint,
+      p.cpsf,p.cpsfLo,p.cpsfHi,p.ext,p.extLo,p.extHi,
+      p.price,p.priceLo,p.priceHi,p.gm,p.gmPct,
+      STATUS[p.status]||p.status,p.nComm,p.kind,p.awaiting?"awaiting pricing":""]
+      .concat(cmp?[d?d.from:null, d?d.d:null, d?d.pct:null, d?d.extD:null, d?d.n:null]:[]);
+  });
   const detHead=["Plan #","Plan name","Series","Community","JDE","Elev","Sq ft",
                  `Cost/sq ft (${basis})`,`Extended cost (${basis})`,"Sales price","Margin %","Status","Incomplete"];
   const det=[];
@@ -922,6 +1572,13 @@ function exportPlans(list){
     const od=state.options.filter(o=>keep.has(o.plan_no) && String(o.opt_code).toUpperCase()!=="1BASE")
       .map(o=>[o.plan_no,o.community,o.elev,o.opt_code,o.opt_name,num(o.amount)]);
     if(od.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([oh,...od]), "Options");
+  }
+  const ci=communityIndex().filter(c=>c.index!=null).sort((a,b)=>b.index-a.index);
+  if(ci.length){
+    const ih=["Community","JDE","Plans priced","Plans compared","Avg cost/sq ft","Cost index (100 = par)","Difference"];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([ih,
+      ...ci.map(c=>[c.name,c.jde,c.plans.size,c.ratios.length,mean(c.cp),c.index,(c.index-100)/100])]),
+      "Community index");
   }
   XLSX.writeFile(wb, `Plan-DB_${state.dataset||"export"}_${state.basis}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }

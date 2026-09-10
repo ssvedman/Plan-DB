@@ -481,3 +481,92 @@ textarea.ed-in{min-height:90px;resize:vertical}
    rail made it overlap the first slider, and a transparent button over live
    content is worse than one that simply scrolls away. */
 .fresetter{width:100%;flex:0 0 auto}
+
+/* ============================================================
+   Month over month, trends, cost-code variance, community index
+   ============================================================ */
+
+/* ---- a signed movement: colour carries the direction, the arrow is only
+   there so it doesn't rely on colour alone ---- */
+.dl{font-weight:600;white-space:nowrap;color:var(--ink)}
+.dl.up{color:var(--red)}          /* cost going up is bad news, hence red */
+.dl.down{color:var(--green)}
+.dl.up::before{content:"▲ ";font-size:8px;vertical-align:1px}
+.dl.down::before{content:"▼ ";font-size:8px;vertical-align:1px}
+.dl .rng{font-weight:400}
+.pt .c-dl{text-align:right;width:120px}
+.pill.hit{background:var(--amber);border-color:var(--amberline);color:#7a5b00;font-weight:700}
+
+/* ---- section bar shared by the new panels ---- */
+.secbar{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:10px 14px;
+  border-bottom:1px solid var(--line);background:var(--grey)}
+.sectitle{font-weight:700;color:var(--navy);font-size:14px}
+.secbar .hint{font-size:12px;color:var(--mute);line-height:1.5}
+.secbar .chk{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.linkbtn2{background:none;border:none;color:var(--blue);font-weight:600;font-size:12.5px;cursor:pointer;padding:4px 6px}
+.linkbtn2:hover{text-decoration:underline}
+.plink{color:var(--link);font-weight:600;cursor:pointer}
+.plink:hover{text-decoration:underline}
+
+/* ---- line chart ----
+   The SVG scales with its container, so everything inside is in chart units.
+   Colours come from the theme so the same markup works light and dark. */
+.chart{padding:12px 14px 4px}
+.ch{width:100%;height:auto;display:block;overflow:visible}
+.ch-grid{stroke:var(--line);stroke-width:1}
+.ch-yl{fill:var(--mute);font-size:11px;text-anchor:end;dominant-baseline:middle}
+.ch-xl{fill:var(--mute);font-size:11px;text-anchor:middle}
+.ch-legend{display:flex;gap:14px;flex-wrap:wrap;padding:8px 2px 10px}
+.ch-key{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mute)}
+.ch-key i{width:14px;height:3px;border-radius:2px;display:inline-block}
+
+/* ---- series line toggles under the chart ---- */
+.serpicks{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:4px 14px 14px}
+.serpick{display:inline-flex;align-items:center;gap:6px;background:var(--card);border:1px solid var(--line);
+  border-radius:20px;padding:4px 11px;font-size:12.5px;color:var(--mute);cursor:pointer}
+.serpick i{width:10px;height:10px;border-radius:50%;display:inline-block;opacity:.35}
+.serpick:hover{border-color:var(--blue)}
+.serpick.on{color:var(--ink);font-weight:600;border-color:var(--blue);background:var(--blue-050)}
+.serpick.on i{opacity:1}
+
+/* ---- movers, side by side until the screen is too narrow ---- */
+.twoup{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+@media(max-width:900px){ .twoup{grid-template-columns:1fr} }
+
+/* ---- community cost index ----
+   The bar grows out from the centre, so over and under par are legible at a
+   glance without reading the number. */
+.ct .c-ix{width:190px;text-align:right}
+.ixw{display:inline-flex;align-items:center;gap:8px;justify-content:flex-end;white-space:nowrap}
+.ixw b{font-size:14px;min-width:26px;text-align:right}
+.ixw .rng{display:inline;font-size:11px;min-width:44px;text-align:right}
+.ixbar{position:relative;display:inline-block;width:64px;height:9px;background:var(--grey);
+  border-radius:3px;overflow:hidden;flex:0 0 auto}
+.ixbar::after{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--line)}
+.ixbar i{position:absolute;top:0;bottom:0;display:block;border-radius:2px}
+.ixw.over  b,.ixw.over  .rng{color:var(--red)}
+.ixw.over  .ixbar i{background:var(--red)}
+.ixw.under b,.ixw.under .rng{color:var(--green)}
+.ixw.under .ixbar i{background:var(--green)}
+.ixw.par   .ixbar i{background:var(--mute)}
+
+/* ---- cost-code variance ---- */
+.cvt th,.cvt td{white-space:nowrap}
+.cvt td:nth-child(2){white-space:normal;min-width:180px}
+.cvt td:nth-child(n+3),.cvt th:nth-child(n+3){text-align:right}
+.cvt .c-ch{width:26px}
+.rng2{color:var(--mute);font-size:12px}
+.spw{display:inline-flex;align-items:center;gap:8px;justify-content:flex-end}
+.spbar{display:inline-block;width:58px;height:9px;background:var(--grey);border-radius:3px;overflow:hidden;flex:0 0 auto}
+.spbar i{display:block;height:100%;background:var(--blue-600);border-radius:3px;min-width:2px}
+
+/* ---- link out to the sibling app ---- */
+.cisbtn{display:inline-block;border:1px solid var(--line);border-radius:7px;padding:3px 9px;
+  font-size:11.5px;font-weight:600;color:var(--blue);text-decoration:none;white-space:nowrap;background:var(--card)}
+.cisbtn:hover{border-color:var(--blue);background:var(--blue-050)}
+.c-cis{text-align:right;width:86px}
+.ct .crow{cursor:pointer}
+.ct .crow.open{background:var(--blue-050)}
+
+@media(max-width:1100px){ .pt .c-dl,.pt th.c-dl{display:none} }
+@media print{ .serpicks,.cisbtn{display:none!important} }

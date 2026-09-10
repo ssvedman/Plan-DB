@@ -10,6 +10,11 @@ window.APP_CONFIG = {
   // Invite / password-reset links land on the hub, same as the other apps.
   BLUEPRINT_URL: "https://ssvedman.github.io/Blueprint/",
 
+  // Sibling app. Same origin and the same shared session, so a link opens
+  // straight into the community without a second sign-in. Set to "" to hide
+  // the CIS buttons entirely.
+  COMMUNITY_DB_URL: "https://ssvedman.github.io/Community-DB/",
+
   ALLOWED_DOMAIN: "@lennar.com",
   DIVISION: { key: "orlando", label: "Orlando Division", code: "OLH" },
   DEFAULT_ROLE: "viewer"
