@@ -159,6 +159,14 @@ function wireChrome(){
   $("dsPick").onchange=async e=>{ state.dataset=e.target.value; state.rng={}; await loadCosts(); render(); };
 }
 function setTab(){ $("tabs").querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.view===state.view)); }
+/* The filter rail sits below the sticky topbar. Its height was hard-coded to
+   96px, which is wrong whenever the topbar wraps — the rail then ran past the
+   bottom of the window and its last filters were unreachable. Measure it. */
+function syncRailTop(){
+  const tb=document.querySelector(".topbar"); if(!tb) return;
+  document.documentElement.style.setProperty("--railtop", Math.round(tb.getBoundingClientRect().height)+"px");
+}
+window.addEventListener("resize", syncRailTop);
 /* One global listener rather than one per dropdown, since the rail is rebuilt
    on every render and per-instance listeners would accumulate. */
 (function(){
@@ -381,6 +389,7 @@ function sortPlans(list){
 
 /* ---------------- RENDER ---------------- */
 function render(){
+  syncRailTop();
   const all=planList();
   syncRanges(inScope(all));
   const list=sortPlans(filtered(all));
@@ -562,12 +571,19 @@ function bindMsel(id, noun, onChange){
      instead, and keep it there while the rail or page scrolls. */
   const place=()=>{
     const r=btn.getBoundingClientRect();
+    const below=window.innerHeight-r.bottom-16, above=r.top-16;
+    // A dropdown near the foot of the rail has no room beneath it, which left
+    // the last few filters opening into a sliver. Flip above the button when
+    // that side has more space.
+    const up = below < 200 && above > below;
+    const h  = Math.max(160, Math.min(320, up?above:below));
     panel.style.position="fixed";
-    panel.style.left=Math.min(r.left, window.innerWidth-320)+"px";
-    panel.style.top=(r.bottom+4)+"px";
+    panel.style.left=Math.max(8, Math.min(r.left, window.innerWidth-328))+"px";
     panel.style.width=Math.max(r.width,240)+"px";
-    panel.style.maxHeight=(window.innerHeight-r.bottom-24)+"px";
+    panel.style.maxHeight=h+"px";
     panel.style.overflowY="auto";
+    if(up){ panel.style.top="auto"; panel.style.bottom=(window.innerHeight-r.top+4)+"px"; }
+    else  { panel.style.bottom="auto"; panel.style.top=(r.bottom+4)+"px"; }
   };
   const onScroll=()=>{ if(!panel.classList.contains("hidden")) place(); };
   btn.onclick=e=>{ e.stopPropagation();

@@ -303,9 +303,10 @@ textarea.ed-in{min-height:90px;resize:vertical}
    dictates. Capping its height and letting it scroll itself makes both columns
    independently scrollable. `overscroll-behavior` stops a rail that has hit its
    end from handing the scroll on to the page. */
-.filters{position:sticky;top:96px;background:var(--card);border:1px solid var(--line);
+.filters{position:sticky;top:calc(var(--railtop, 96px) + 8px);background:var(--card);border:1px solid var(--line);
   border-radius:var(--radius);padding:14px;box-shadow:var(--shadow);display:flex;flex-direction:column;gap:18px;
-  max-height:calc(100vh - 112px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+  max-height:calc(100vh - var(--railtop, 96px) - 24px);
+  overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;padding-bottom:20px}
 .fgroup{display:flex;flex-direction:column}
 .fgh{font-size:11.5px;font-weight:700;color:var(--mute);text-transform:uppercase;letter-spacing:.04em;
   margin-bottom:9px;display:flex;align-items:baseline;gap:6px}
@@ -459,5 +460,7 @@ textarea.ed-in{min-height:90px;resize:vertical}
    the rail gets room to show it and the panel is allowed to sit above. */
 .fgroup{position:relative}
 
-/* Reset sits at the top of the rail and stays put while the rail scrolls */
-.fresetter{width:100%;position:sticky;top:0;z-index:5}
+/* Reset sits at the top of the rail. NOT sticky: sticky inside the scrolling
+   rail made it overlap the first slider, and a transparent button over live
+   content is worse than one that simply scrolls away. */
+.fresetter{width:100%;flex:0 0 auto}
