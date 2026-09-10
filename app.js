@@ -11,13 +11,16 @@ const SERIES_LABEL = window.PDB_SERIES_LABEL || {};
 /* Chip facets and sliders are declared once. Everything that filters, counts,
    labels or clears them walks these lists, so adding a dimension is one entry
    rather than a branch in six places. */
+/* `noun` is [singular, plural] for the dropdown label ("All statuses",
+   "1 status selected"). Spelled out rather than derived: appending "s" to the
+   heading gives "bedss", "statuss" and other nonsense. */
 const FACETS = [
-  { key:"site",   label:"Homesite", get:p=>p.site },
-  { key:"tier",   label:"Tier",     get:p=>p.tier,   fmt:v=>"Tier "+v },
-  { key:"beds",   label:"Beds",     get:p=>p.beds,   fmt:v=>v+" bed" },
-  { key:"baths",  label:"Baths",    get:p=>p.baths,  fmt:v=>v+" bath" },
-  { key:"sty",    label:"Stories",  get:p=>p.sty,    fmt:v=>v+" level"+(v==="1"?"":"s") },
-  { key:"status", label:"Status",   get:p=>p.status, fmt:v=>(STATUS[v]||v) }
+  { key:"site",   label:"Homesite", noun:["homesite","homesites"], get:p=>p.site },
+  { key:"tier",   label:"Tier",     noun:["tier","tiers"],         get:p=>p.tier,   fmt:v=>"Tier "+v },
+  { key:"beds",   label:"Beds",     noun:["bed count","bed counts"],   get:p=>p.beds,   fmt:v=>v+" bed" },
+  { key:"baths",  label:"Baths",    noun:["bath count","bath counts"], get:p=>p.baths,  fmt:v=>v+" bath" },
+  { key:"sty",    label:"Stories",  noun:["storey count","storey counts"], get:p=>p.sty, fmt:v=>v+" level"+(v==="1"?"":"s") },
+  { key:"status", label:"Status",   noun:["status","statuses"],     get:p=>p.status, fmt:v=>(STATUS[v]||v) }
 ];
 /* Plan Master status codes, spelled out. Unknown codes fall through as-is. */
 const STATUS = { ACT:"Active", COM:"Coming", DFW:"Deferred", DSL:"Discontinued sale",
@@ -421,6 +424,12 @@ function renderPlans(a, all, list){
     </div>
     <div class="plansplit">
       <aside class="filters" id="filters">
+        <button class="btn mini ghost fresetter" id="btnReset">Reset all filters</button>
+        ${SLIDERS.map(sl=>`<div class="fgroup">
+          <div class="fgh">${esc(sl.label)}${(sl.key==="cpsf"||sl.key==="ext")
+            ?`<span class="fgh-note">${state.basis==="tax"?"with tax":"untaxed"}</span>`:""}</div>
+          <div id="rs_${sl.key}"></div>
+        </div>`).join("")}
         <div class="fgroup">
           <div class="fgh">Series</div>
           ${(()=>{ const pool=filtered(all,"series");
@@ -429,12 +438,6 @@ function renderPlans(a, all, list){
             return mselHTML("dd_series",["series","series"],opts,Object.keys(state.series)); })()}
         </div>
         ${FACETS.map(f=>facetDropdown(f,all)).join("")}
-        ${SLIDERS.map(sl=>`<div class="fgroup">
-          <div class="fgh">${esc(sl.label)}${(sl.key==="cpsf"||sl.key==="ext")
-            ?`<span class="fgh-note">${state.basis==="tax"?"with tax":"untaxed"}</span>`:""}</div>
-          <div id="rs_${sl.key}"></div>
-        </div>`).join("")}
-        <button class="btn mini ghost" id="btnReset" style="width:100%">Reset all filters</button>
       </aside>
       <div class="planmain">
         <div class="sortbar">
@@ -454,7 +457,7 @@ function renderPlans(a, all, list){
   $("btnReset").onclick=clearAllFilters;
   const applyMsel=(bagKey,vals)=>{ const bag={}; vals.forEach(v=>{ bag[v]=true; }); state[bagKey]=bag; render(); };
   bindMsel("dd_series",["series","series"],v=>applyMsel("series",v));
-  FACETS.forEach(f=>bindMsel("dd_"+f.key,[lc(f.label),lc(f.label)+"s"],v=>applyMsel(f.key,v)));
+  FACETS.forEach(f=>bindMsel("dd_"+f.key, f.noun, v=>applyMsel(f.key,v)));
   a.querySelectorAll("[data-sort]").forEach(b=>b.onclick=()=>{
     const k=b.dataset.sort;
     if(state.sort===k) state.sortDir=-state.sortDir;
@@ -608,7 +611,7 @@ function facetDropdown(f, all){
   const opts=vals.map(v=>({ value:v,
     label:(v==="—"?"Unlisted":(f.fmt?f.fmt(v):v))+"  ("+counts.get(v)+")" }));
   return `<div class="fgroup"><div class="fgh">${esc(label)}</div>
-    ${mselHTML("dd_"+key,[lc(label),lc(label)+"s"],opts,Object.keys(state[key]))}</div>`;
+    ${mselHTML("dd_"+key, f.noun, opts, Object.keys(state[key]))}</div>`;
 }
 function planRowHTML(p){
   const rangeCp = (p.cpsfLo!=null && p.cpsfHi!=null && p.cpsfHi-p.cpsfLo>0.01)

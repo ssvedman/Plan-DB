@@ -458,3 +458,6 @@ textarea.ed-in{min-height:90px;resize:vertical}
 /* A panel inside a scrolling rail would be clipped by the rail's overflow, so
    the rail gets room to show it and the panel is allowed to sit above. */
 .fgroup{position:relative}
+
+/* Reset sits at the top of the rail and stays put while the rail scrolls */
+.fresetter{width:100%;position:sticky;top:0;z-index:5}
