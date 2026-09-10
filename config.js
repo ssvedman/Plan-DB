@@ -16,7 +16,15 @@ window.APP_CONFIG = {
   COMMUNITY_DB_URL: "https://ssvedman.github.io/Community-DB/",
 
   ALLOWED_DOMAIN: "@lennar.com",
-  DIVISION: { key: "orlando", label: "Orlando Division", code: "OLH" },
+
+  /* Divisions in the picker, same keys the other tools use. Everything in the
+     database carries a `division`, so adding one here is all the app needs —
+     load that division's seed and it appears. The first entry is the default
+     for someone who has never chosen; after that the choice is remembered. */
+  DIVISIONS: [
+    { key: "orlando", label: "Orlando", code: "OLH" },
+    { key: "tampa",   label: "Tampa",   code: "TPU" }
+  ],
   DEFAULT_ROLE: "viewer"
 };
 

@@ -24,7 +24,7 @@ const FACETS = [
 ];
 /* Plan Master status codes, spelled out. Unknown codes fall through as-is. */
 const STATUS = { ACT:"Active", COM:"Coming", DFW:"Deferred", DSL:"Discontinued sale",
-                 SHL:"Shell", DIS:"Discontinued", TMP:"Temporary" };
+                 SHL:"Shell", DIS:"Discontinued", TMP:"Temporary", MDL:"Model" };
 const SLIDERS = [
   { key:"cpsf",  label:"Cost per sq ft",  step:0.5,  get:p=>p.cpsf,  fmt:v=>money2(v) },
   { key:"ext",   label:"Extended cost",   step:500,  get:p=>p.ext,   fmt:v=>money(v) },
@@ -42,9 +42,23 @@ if (!DEMO && window.supabase) {
   window.addEventListener("storage", e => { if (e.key === "lennar-vendor-portal-auth" && !e.newValue) location.reload(); });
 }
 
+const DIVISIONS = (CFG.DIVISIONS && CFG.DIVISIONS.length)
+  ? CFG.DIVISIONS : [{ key:"orlando", label:"Orlando", code:"OLH" }];
+function divOf(k){ return DIVISIONS.find(d=>d.key===k) || DIVISIONS[0]; }
+/* The chosen division is remembered per person, not per browser profile, so
+   two people sharing a machine don't inherit each other's. */
+function divKey(){ return "pdb_div:"+lc(state.email||"anon"); }
+function loadDiv(){
+  try{ const v=localStorage.getItem(divKey());
+    if(v && DIVISIONS.some(d=>d.key===v)) return v; }catch(e){}
+  return DIVISIONS[0].key;
+}
+
 const state = {
   email:null, role:"viewer", view:"plans",
+  division:DIVISIONS[0].key,
   rows:[], plans:{}, datasets:[], dataset:null,
+  cisJde:null,                       // JDEs Community-DB actually holds
   cmp:null,                          // dataset the current one is measured against
   hist:[],                           // every dataset, few columns — drives deltas and trends
   basis:"tax",                       // "tax" = with tax, "net" = untaxed
@@ -158,7 +172,37 @@ async function enterApp(email){
   $("auth").classList.add("hidden"); $("app").classList.remove("hidden");
   $("userChip").innerHTML=esc(state.email)+` <span class="role-tag">${esc(state.role)}</span>`;
   $("themeBtn").textContent=document.documentElement.getAttribute("data-theme")==="dark"?"Light":"Dark";
+  state.division=loadDiv();
   wireChrome();
+  await loadCisIndex();
+  await loadAll();
+  render();
+}
+/* Which communities the sibling app actually holds. Plan-DB covers divisions
+   Community-DB does not, so linking on the strength of a JDE alone would put a
+   button on rows that lead nowhere. One small query settles it; if it fails,
+   no buttons rather than broken ones. */
+async function loadCisIndex(){
+  state.cisJde=new Set();
+  if(DEMO||!sb||!CFG.COMMUNITY_DB_URL) return;
+  try{
+    const { data,error } = await sb.from("cdb_cis").select("jde").not("jde","is",null);
+    if(error) throw error;
+    (data||[]).forEach(r=>{ const j=String(r.jde||"").trim(); if(j) state.cisJde.add(j); });
+  }catch(e){ console.error(e); }
+}
+/* Switching division reloads everything that is scoped to one: the roster, the
+   months, the costs and every cached aggregate. Nothing from the old division
+   may survive into the new one. */
+async function setDivision(k){
+  if(!k || k===state.division || !DIVISIONS.some(d=>d.key===k)) return;
+  state.division=k;
+  try{ localStorage.setItem(divKey(), k); }catch(e){}
+  state.dataset=null; state.cmp=null; state.datasets=[]; state.hist=[]; histIndex=null;
+  state.rng={}; state.open={}; state.openComm={}; state.openCode={};
+  state.cc={}; state.ccBusy={}; state.ccv=null; state.ccd={}; state.ccvErr=null;
+  state.trendSeries={}; state.trendTouched=false;
+  clearAllFilters(true);
   await loadAll();
   render();
 }
@@ -205,11 +249,11 @@ window.addEventListener("scroll", syncRailTop, {passive:true});
 async function loadAll(){
   if(DEMO||!sb){ state.rows=[]; state.names={}; return; }
   try{
-    const { data:pl } = await sb.from("pdb_plans").select("*").eq("division",CFG.DIVISION.key);
+    const { data:pl } = await sb.from("pdb_plans").select("*").eq("division",state.division);
     state.plans={}; (pl||[]).forEach(r=>{ state.plans[r.plan_no]=r; });
   }catch(e){ console.error(e); state.plans={}; }
   try{
-    const { data:ds } = await sb.from("pdb_plan_costs").select("dataset").eq("division",CFG.DIVISION.key);
+    const { data:ds } = await sb.from("pdb_plan_costs").select("dataset").eq("division",state.division);
     state.datasets=[...new Set((ds||[]).map(r=>r.dataset))].sort().reverse();
   }catch(e){ state.datasets=[]; }
   /* Opens on the newest month. An older one can be chosen, but the app says so
@@ -245,23 +289,29 @@ async function setDataset(ds){
    view, so it belongs to the page, not to one table. */
 function renderScope(){
   const el=$("scope"); if(!el) return;
-  if(state.datasets.length<2){ el.classList.add("hidden"); el.innerHTML=""; return; }
+  const manyDivs=DIVISIONS.length>1, manyMonths=state.datasets.length>1;
+  if(!manyDivs && !manyMonths){ el.classList.add("hidden"); el.innerHTML=""; return; }
   el.classList.remove("hidden");
-  const stale=!isCurrent();
+  const stale=manyMonths && !isCurrent();
   el.classList.toggle("stale", stale);
   const note = stale
     ? `This is not the current month — ${esc(dsLabel(state.datasets[0]))} is.`
+    : !state.datasets.length ? `No cost data loaded for ${esc(divOf(state.division).label)} yet.`
     : state.cmp ? `Current month. Trend compares it with ${esc(dsLabel(state.cmp))}.`
-                : `Current month.`;
+                : `${esc(dsLabel(state.dataset))} — the only month loaded, so there is no trend yet.`;
   el.innerHTML=`<div class="scope-in">
-      <label class="scope-l" for="dsPick">Month</label>
+      ${manyDivs?`<label class="scope-l" for="divPick">Division</label>
+      <select class="scope-sel" id="divPick">${DIVISIONS.map(d=>
+        `<option value="${esc(d.key)}"${d.key===state.division?" selected":""}>${esc(d.label)}</option>`).join("")}</select>`:""}
+      ${manyMonths?`<label class="scope-l" for="dsPick">Month</label>
       <select class="scope-sel" id="dsPick">${state.datasets.map((d,i)=>
-        `<option value="${esc(d)}"${d===state.dataset?" selected":""}>${esc(dsLabel(d))}${i===0?" (current)":""}</option>`).join("")}</select>
+        `<option value="${esc(d)}"${d===state.dataset?" selected":""}>${esc(dsLabel(d))}${i===0?" (current)":""}</option>`).join("")}</select>`:""}
       <span class="scope-note">${note}</span>
       ${stale?`<button class="btn mini ghost" id="dsNow">Back to ${esc(dsLabel(state.datasets[0]))}</button>`:""}
     </div>`;
-  $("dsPick").onchange=e=>setDataset(e.target.value);
-  if($("dsNow")) $("dsNow").onclick=()=>setDataset(state.datasets[0]);
+  if($("divPick")) $("divPick").onchange=e=>setDivision(e.target.value);
+  if($("dsPick"))  $("dsPick").onchange=e=>setDataset(e.target.value);
+  if($("dsNow"))   $("dsNow").onclick=()=>setDataset(state.datasets[0]);
 }
 /* Deltas and the trend chart need every month at once, but only a handful of
    columns. Asking for those columns keeps the whole history smaller than one
@@ -275,7 +325,7 @@ async function loadHist(){
     const PAGE=1000;
     for(let from=0;;from+=PAGE){
       const { data,error } = await sb.from("pdb_plan_costs").select(COLS)
-        .eq("division",CFG.DIVISION.key).range(from, from+PAGE-1);
+        .eq("division",state.division).range(from, from+PAGE-1);
       if(error) throw error;
       state.hist=state.hist.concat(data||[]);
       if(!data || data.length<PAGE) break;
@@ -292,7 +342,7 @@ async function loadCostCodes(plan){
   state.ccBusy[plan]=true;
   try{
     const { data,error } = await sb.from("pdb_cost_codes").select("*")
-      .eq("division",CFG.DIVISION.key).eq("dataset",state.dataset).eq("plan_no",plan);
+      .eq("division",state.division).eq("dataset",state.dataset).eq("plan_no",plan);
     if(error) throw error;
     state.cc[plan]=data||[];
   }catch(e){ console.error(e); state.cc[plan]=[]; }
@@ -305,7 +355,7 @@ async function loadOptions(){
     const PAGE=1000;
     for(let from=0;;from+=PAGE){
       const { data,error } = await sb.from("pdb_plan_options").select("*")
-        .eq("division",CFG.DIVISION.key).eq("dataset",state.dataset).range(from,from+PAGE-1);
+        .eq("division",state.division).eq("dataset",state.dataset).range(from,from+PAGE-1);
       if(error) throw error;
       state.options=state.options.concat(data||[]);
       if(!data || data.length<PAGE) break;
@@ -319,7 +369,7 @@ async function loadCosts(){
     const PAGE=1000;
     for(let from=0;;from+=PAGE){
       const { data,error } = await sb.from("pdb_plan_costs").select("*")
-        .eq("division",CFG.DIVISION.key).eq("dataset",state.dataset)
+        .eq("division",state.division).eq("dataset",state.dataset)
         .range(from, from+PAGE-1);
       if(error) throw error;
       state.rows=state.rows.concat(data||[]);
@@ -570,10 +620,13 @@ function render(){
      month is on screen and what the trend is measured against, so it says
      both. */
   $("footMeta").textContent = state.rows.length
-    ? [dsLabel(state.dataset), state.cmp?"trend vs "+dsLabel(state.cmp):null,
+    ? [divOf(state.division).label, dsLabel(state.dataset),
+       state.cmp?"trend vs "+dsLabel(state.cmp):null,
        state.rows.length.toLocaleString()+" rows",
        state.basis==="tax"?"with tax":"untaxed"].filter(Boolean).join(" · ")
     : "";
+  const sub=document.querySelector(".title .sub");
+  if(sub) sub.textContent=divOf(state.division).label+" Division";
   const tt=$("tTrend"); if(tt) tt.classList.toggle("hidden", state.datasets.length<2);
   renderScope();
   const a=$("viewArea");
@@ -585,13 +638,13 @@ function render(){
   renderPlans(a, all, list);
 }
 function renderEmpty(a){
+  const other=DIVISIONS.filter(d=>d.key!==state.division).map(d=>d.label).join(" or ");
   a.innerHTML=`<div class="panel"><div class="empty" style="padding:40px 24px;text-align:center">
-    <h3 style="margin:0 0 8px;color:var(--navy)">No plan data loaded yet</h3>
+    <h3 style="margin:0 0 8px;color:var(--navy)">Nothing loaded for ${esc(divOf(state.division).label)} yet</h3>
     <p class="tiny" style="max-width:520px;margin:0 auto 4px">
-      Run <code>supabase_setup.sql</code> and then the seed file in the Supabase SQL editor for
-      this project. Cost data is deliberately not bundled into the site, so the app shows nothing
-      until the tables are populated.</p>
-    <p class="tiny" style="margin-top:10px">If you have just loaded it, sign out and back in to refresh.</p>
+      Run this division's seed file in the Supabase SQL editor. Cost data is deliberately not
+      bundled into the site, so the app shows nothing until the tables are populated.</p>
+    ${other?`<p class="tiny" style="margin-top:10px">${esc(other)} may still have data — switch division above.</p>`:""}
   </div></div>`;
 }
 
@@ -906,6 +959,10 @@ function cisHref(jde){
 function cisBtnHTML(jde, name){
   const href=cisHref(jde);
   if(!href) return "";
+  // Plan-DB covers divisions Community-DB doesn't. A button that lands on
+  // "no match" is worse than no button, so only offer it for a community the
+  // other app actually holds.
+  if(state.cisJde && !state.cisJde.has(String(jde).trim())) return "";
   return `<a class="cisbtn" href="${esc(href)}" target="_blank" rel="noopener"
     title="Open ${esc(name||"this community")} in Community-DB">View CIS</a>`;
 }
@@ -1018,10 +1075,11 @@ function anyFilterOn(){
             !state.showAwaiting || state.showShells || state.showIncomplete ||
             SLIDERS.some(s=>rngActive(s.key)));
 }
-function clearAllFilters(){
+function clearAllFilters(quiet){
   state.q=""; state.series={}; state.rng={};
   FACETS.forEach(f=>{ state[f.key]={}; });
-  state.showShells=false; state.showAwaiting=true; state.showIncomplete=false; render();
+  state.showShells=false; state.showAwaiting=true; state.showIncomplete=false;
+  if(!quiet) render();          // the division switch renders once, after loading
 }
 function filterNote(total, shownN){
   if(!anyFilterOn()) return "";
@@ -1384,7 +1442,7 @@ async function loadCcVariance(){
   state.ccvBusy=true; state.ccvErr=null;
   try{
     const { data,error } = await sb.rpc("pdb_cc_variance",
-      { p_dataset:state.dataset, p_prev:state.cmp||null, p_division:CFG.DIVISION.key });
+      { p_dataset:state.dataset, p_prev:state.cmp||null, p_division:state.division });
     if(error) throw error;
     state.ccv=data||[];
   }catch(e){
@@ -1398,7 +1456,7 @@ async function loadCcCode(code){
   state.ccdBusy[code]=true;
   try{
     const { data,error } = await sb.rpc("pdb_cc_code_plans",
-      { p_dataset:state.dataset, p_code:code, p_division:CFG.DIVISION.key });
+      { p_dataset:state.dataset, p_code:code, p_division:state.division });
     if(error) throw error;
     state.ccd[code]=data||[];
   }catch(e){ console.error(e); state.ccd[code]=[]; }
@@ -1626,7 +1684,7 @@ function exportPlans(list){
       ...ci.map(c=>[c.name,c.jde,c.plans.size,c.ratios.length,mean(c.cp),c.index,(c.index-100)/100])]),
       "Community index");
   }
-  XLSX.writeFile(wb, `Plan-DB_${state.dataset||"export"}_${state.basis}_${new Date().toISOString().slice(0,10)}.xlsx`);
+  XLSX.writeFile(wb, `Plan-DB_${divOf(state.division).label}_${state.dataset||"export"}_${state.basis}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 /* ---------------- BOOTSTRAP ---------------- */
