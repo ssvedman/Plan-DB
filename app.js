@@ -253,16 +253,17 @@ async function loadAll(){
     const { data:pl } = await sb.from("pdb_plans").select("*").eq("division",state.division);
     state.plans={}; (pl||[]).forEach(r=>{ state.plans[r.plan_no]=r; });
   }catch(e){ console.error(e); state.plans={}; }
-  try{
-    const { data:ds } = await sb.from("pdb_plan_costs").select("dataset").eq("division",state.division);
-    state.datasets=[...new Set((ds||[]).map(r=>r.dataset))].sort().reverse();
-  }catch(e){ state.datasets=[]; }
+  /* The month list comes from the history, which is paged, rather than from a
+     select of its own. A plain select stops at the first 1000 rows, and with
+     thousands of rows per division that window landed inside the first month
+     or two — so the newest months simply never appeared in the picker. */
+  await loadHist();
+  state.datasets=[...new Set(state.hist.map(r=>r.dataset))].sort().reverse();
   /* Opens on the newest month. An older one can be chosen, but the app says so
      loudly while it is — the failure mode worth designing against is reading a
      stale month as if it were current, not the inconvenience of switching. */
   state.dataset = state.datasets[0] || window.PDB_DEFAULT_DATASET || null;
   state.cmp     = priorTo(state.dataset);
-  await loadHist();
   await loadCosts();
 }
 /* `datasets` runs newest first, so the month before any given one is the next
@@ -321,7 +322,10 @@ function renderScope(){
 async function loadHist(){
   state.hist=[];
   if(DEMO||!sb) return;
-  const COLS="dataset,comm_num,community,jde,plan_no,elev,sqft,cpsf,cpsf_tax,ext_price,ext_price_tax,base_price,incomplete,kind";
+  // `division` is redundant with the filter below, but carrying it makes the
+  // history self-describing: anything that later reads state.hist can tell
+  // which division it belongs to instead of assuming.
+  const COLS="division,dataset,comm_num,community,jde,plan_no,elev,sqft,cpsf,cpsf_tax,ext_price,ext_price_tax,base_price,incomplete,kind";
   try{
     const PAGE=1000;
     for(let from=0;;from+=PAGE){

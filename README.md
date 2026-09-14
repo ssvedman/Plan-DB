@@ -23,6 +23,9 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
 - Every table carries a division. Adding one is a `config.js` entry plus that
   division's data; the picker and the queries follow. The choice is remembered
   per person.
+- `load.html` is reachable by anyone, and that is fine: it can do nothing
+  without a signed-in editor, and the database enforces that independently of
+  the page. The row-level policies are the boundary, not the UI gate.
 - **Loading a month goes through `load.html`, not SQL.** Editors drop the
   `.ndjson` files in and the page writes them over their own session. A month
   replaces the same month wholesale rather than merging, so a plan that stopped
@@ -57,6 +60,9 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
   and a description on each one; across four months and three divisions that is
   900k rows carrying 238 distinct descriptions. The maps hold the same numbers
   in 11k rows. Descriptions live once, in `pdb_cost_code_names`.
+- Anything that lists what exists — the months in the picker, the history
+  behind the charts — must page. A plain select stops at 1000 rows, which on a
+  division with thousands of cost rows silently hid the newest months.
 - Cost codes are never loaded up front. Per-plan detail is fetched on demand
   and unrolled into one entry per code in the browser; the aggregates behind the
   variance view are computed in the database, by functions that run as the
