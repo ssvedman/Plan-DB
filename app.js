@@ -68,6 +68,7 @@ const state = {
   options:[],                        // per-plan options (small, loaded up front)
   cc:{}, ccBusy:{},                  // cost codes per plan — fetched on demand
   ccv:null, ccvBusy:false, ccvErr:null,   // cost-code variance (server-aggregated)
+  ccNames:null,                      // code -> description, shared across divisions
   ccd:{}, ccdBusy:{},                // one code's plan-by-plan detail, on demand
   ccSort:"spread", ccq:"",
   showShells:false,
@@ -336,15 +337,40 @@ async function loadHist(){
    datasets doesn't silently truncate. */
 /* Cost codes are tens of thousands of rows, so they are never loaded up front —
    only for a plan the user actually opens, and cached per plan. */
+/* The breakdown arrives as one JSON map per priced home. It is flattened back
+   into one entry per code here, so everything downstream still works on plain
+   rows and only the storage shape changed. Descriptions come from the shared
+   code list, fetched once. */
+async function loadCodeNames(){
+  if(state.ccNames) return;
+  state.ccNames={};
+  if(DEMO||!sb) return;
+  try{
+    const { data,error } = await sb.from("pdb_cost_code_names").select("code,description");
+    if(error) throw error;
+    (data||[]).forEach(r=>{ state.ccNames[r.code]=r.description||""; });
+  }catch(e){ console.error(e); }
+}
 async function loadCostCodes(plan){
   if(state.cc[plan] || state.ccBusy[plan]) return;
   if(DEMO||!sb||!state.dataset){ state.cc[plan]=[]; return; }
   state.ccBusy[plan]=true;
   try{
-    const { data,error } = await sb.from("pdb_cost_codes").select("*")
+    await loadCodeNames();
+    const { data,error } = await sb.from("pdb_cost_codes")
+      .select("comm_num,community,plan_no,elev,codes")
       .eq("division",state.division).eq("dataset",state.dataset).eq("plan_no",plan);
     if(error) throw error;
-    state.cc[plan]=data||[];
+    const out=[];
+    (data||[]).forEach(r=>{
+      const m=r.codes||{};
+      Object.keys(m).forEach(code=>{
+        out.push({ comm_num:r.comm_num, community:r.community, plan_no:r.plan_no,
+                   elev:r.elev||null, code, description:(state.ccNames||{})[code]||"",
+                   cpsf:num(m[code]) });
+      });
+    });
+    state.cc[plan]=out;
   }catch(e){ console.error(e); state.cc[plan]=[]; }
   finally{ state.ccBusy[plan]=false; }
 }

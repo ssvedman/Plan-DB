@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plan-DB — import</title>
+<link rel="icon" href="logo.svg">
+<link rel="stylesheet" href="styles.css?v=14">
+<style>
+  .wrap{max-width:900px;margin:0 auto;padding:22px 18px 60px}
+  .drop{border:2px dashed var(--line);border-radius:14px;padding:38px 24px;text-align:center;
+        background:var(--card);cursor:pointer;transition:border-color .15s,background .15s}
+  .drop:hover,.drop.over{border-color:var(--blue);background:var(--blue-050)}
+  .drop h3{margin:0 0 6px;color:var(--navy)}
+  .queue{margin-top:18px;border:1px solid var(--line);border-radius:12px;background:var(--card);overflow:hidden}
+  .qrow{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line)}
+  .qrow:last-child{border-bottom:0}
+  .qname{font-weight:600;min-width:170px}
+  .qmeta{font-size:12px;color:var(--mute);flex:1}
+  .qbar{height:7px;border-radius:4px;background:var(--grey);width:160px;overflow:hidden;flex:0 0 auto}
+  .qbar i{display:block;height:100%;width:0;background:var(--blue-600);transition:width .2s}
+  .qstate{font-size:12px;font-weight:600;min-width:74px;text-align:right}
+  .qstate.ok{color:var(--green)} .qstate.err{color:var(--red)}
+  .log{margin-top:16px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;
+       background:var(--grey);border:1px solid var(--line);border-radius:10px;padding:12px;
+       max-height:260px;overflow:auto;white-space:pre-wrap}
+  .acts{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <a class="home-logo" href="index.html" title="Back to Plan-DB"><img src="logo.svg" alt="Plan-DB"></a>
+    <span class="title">Plan-DB <span class="sub">import</span></span>
+    <div class="spacer"></div>
+    <div class="topbar-actions">
+      <span class="user-chip" id="userChip">checking…</span>
+      <a class="linkbtn" href="index.html">Back to the app</a>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="gate" class="msg err hidden" style="margin-bottom:16px"></div>
+
+  <p class="tiny" style="margin:0 0 14px">
+    Drop the <code>.ndjson</code> files from the build folder here. Each one names the table it
+    loads. Months present in a file replace the same months in the database; anything not mentioned
+    is left alone. Nothing is uploaded anywhere else — the rows go straight from this page to the
+    database over your own signed-in session.
+  </p>
+
+  <div class="drop" id="drop">
+    <h3>Drop data files here</h3>
+    <p class="tiny" style="margin:0">or click to choose them · plans, codenames, costs, options, costcodes</p>
+    <input type="file" id="pick" multiple accept=".ndjson,.json" class="hidden">
+  </div>
+
+  <div class="queue hidden" id="queue"></div>
+
+  <div class="acts">
+    <button class="btn mini solid hidden" id="go">Load into the database</button>
+    <button class="btn mini ghost hidden" id="clear">Clear</button>
+    <label class="hint chk hidden" id="wipeWrap" style="display:none;align-items:center;gap:6px">
+      <input type="checkbox" id="wipe"> Remove months that aren't in these files
+    </label>
+  </div>
+
+  <div class="log hidden" id="log"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.3/dist/umd/supabase.js"
+        integrity="sha384-qafw21c/iciq0VXsi9FzkfoQv5I/V0iqE4lSNcKXPnW9/UTJLnv5CcN4FHxVLnKg" crossorigin="anonymous"></script>
+<script src="config.js?v=14"></script>
+<script src="load.js?v=14"></script>
+</body>
+</html>

@@ -13,6 +13,7 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
 | `app.js` | Auth, load, rollup, filters, views, export |
 | `config.js` | Connection settings, series display order |
 | `styles.css` | Shared design language plus this app's components |
+| `load.html` / `load.js` | Importer. Editors drop a month's data files in. |
 | `*.sql` | Backend. Kept local, not published. |
 
 ## Notes
@@ -20,8 +21,12 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
 - **Cost data never lives in this repo.** It belongs only in Supabase, behind
   RLS. Don't add a static data fallback to the site.
 - Every table carries a division. Adding one is a `config.js` entry plus that
-  division's seed; the picker and the queries follow. The choice is remembered
+  division's data; the picker and the queries follow. The choice is remembered
   per person.
+- **Loading a month goes through `load.html`, not SQL.** Editors drop the
+  `.ndjson` files in and the page writes them over their own session. A month
+  replaces the same month wholesale rather than merging, so a plan that stopped
+  being offered disappears instead of lingering.
 - Plan numbers are division-specific but plan names are not — the same home is
   a different number in each division. Never copy a name or a series across on
   the strength of a matching number; match on the name instead.
@@ -47,13 +52,27 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
   elsewhere that month, so it doesn't reward a community for selling small
   homes. A plan built in only one place is excluded — it would be its own
   benchmark.
-- Cost codes are never loaded up front. Per-plan detail is fetched on demand;
-  the aggregates behind the variance view are computed in the database, by
-  functions that run as the caller so the same access rules apply.
+- The cost-code breakdown is one JSON map per priced home, not one row per
+  code. A row per code repeated the division, month, community, plan, elevation
+  and a description on each one; across four months and three divisions that is
+  900k rows carrying 238 distinct descriptions. The maps hold the same numbers
+  in 11k rows. Descriptions live once, in `pdb_cost_code_names`.
+- Cost codes are never loaded up front. Per-plan detail is fetched on demand
+  and unrolled into one entry per code in the browser; the aggregates behind the
+  variance view are computed in the database, by functions that run as the
+  caller so the same access rules apply.
+- That breakdown totals the base home **plus every option**, while a plan's
+  headline cost per sq ft is the base alone. The two reconcile against
+  `1BASE + options`, not against the headline figure.
 - Community links use `#jde=<number>` on the sibling app. Same origin and
   shared session, so the link lands inside the record.
-- A row is marked unreliable by three independent signals: an impossibly low
-  figure; the same plan priced far below what it costs in other communities
-  that month; or the same row roughly doubling in a later month at identical
-  sq ft. The last one only applies where a later month has been loaded, and it
-  is why loading a new month can re-flag an older one.
+- A row is marked unreliable by four independent signals: an impossibly low
+  figure; a figure too high to be a cost per sq ft, which means the square
+  footage is wrong rather than the cost; the same plan priced far below what it
+  costs in other communities that month; or the same home roughly doubling in a
+  later month at identical sq ft. The last only applies where a later month has
+  been loaded, and it is why loading a new month can re-flag an older one.
+- Column positions in the source workbooks are not stable — some carry an extra
+  "Plan Name" column. Read them by heading, never by index: reading by index
+  mistook the plan name for the elevation and silently collapsed three
+  elevations into one.

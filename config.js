@@ -23,7 +23,8 @@ window.APP_CONFIG = {
      for someone who has never chosen; after that the choice is remembered. */
   DIVISIONS: [
     { key: "orlando", label: "Orlando", code: "OLH" },
-    { key: "tampa",   label: "Tampa",   code: "TPU" }
+    { key: "tampa",   label: "Tampa",   code: "TPU" },
+    { key: "ocala",   label: "Ocala",   code: "OCA" }
   ],
   DEFAULT_ROLE: "viewer"
 };
