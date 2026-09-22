@@ -152,7 +152,7 @@ function plan(parsed, roster, opts){
   const by=new Map(); divs.forEach(d=>by.set(d,new Map()));
   (roster||[]).forEach(r=>{ const m=by.get(r.division); if(m) m.set(String(r.plan_no).toUpperCase(), r); });
   const seriesFor=L=>known[norm(L.collection)]||title(L.collection);
-  const rep={ matched:[], added:[], conflicts:[], tierChanges:[], seriesSet:[], unplaced:[], other:[] };
+  const rep={ matched:[], added:[], conflicts:[], tierChanges:[], seriesSet:[], sqftFixes:[], unplaced:[], other:[] };
   const touched=new Map();          // div|plan -> row
   const full=r=>{ const o={}; PLAN_COLS.forEach(k=>{ o[k]=r[k]===undefined?null:r[k]; });
     o.plan_pending=!!o.plan_pending;            // NOT NULL in the table
@@ -196,7 +196,14 @@ function plan(parsed, roster, opts){
           r.tier=L.tier;
         }
         if(!r.name) r.name=L.plan_name+(L.unit?` (${L.unit})`:"");
-        if(r.sqft==null && L.sqft!=null) r.sqft=L.sqft;
+        // Blank sizes are filled; a size more than 8% off the sheet is replaced
+        // and reported. Those come from a bad workbook row (Tampa's Frey, Nash,
+        // Springsteen and Santana at 3,041 from one Cypress Point block).
+        if(L.sqft!=null){
+          const cur=r.sqft==null?null:+r.sqft;
+          if(cur==null) r.sqft=L.sqft;
+          else if(Math.abs(cur-L.sqft)/L.sqft>0.08){ rep.sqftFixes.push({division:d, plan_no:code, name:r.name, from:cur, to:L.sqft}); r.sqft=L.sqft; }
+        }
         if(!r.beds && L.beds) r.beds=L.beds;
         if(!r.baths && L.baths) r.baths=L.baths;
         if(!r.levels && L.stories) r.levels=L.stories;

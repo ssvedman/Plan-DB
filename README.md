@@ -102,6 +102,13 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
   missing code as zero, so a division's codes add up to its average home and a
   code only one division pays shows as a real difference. Untaxed only — the
   cost-code maps carry no tax.
+- A plan's square footage comes from the rows that priced it (the largest
+  among reliable rows), not the roster. The roster once took the largest figure
+  any workbook gave, and a stray block in Cypress Point 50's (rows with no
+  elevation, all 3,041 sq ft) doubled Tampa's Frey, Nash, Springsteen and
+  Santana. A lineup import corrects roster sizes more than 8% off the sheet.
+- An old plan number with `core_alias` (Orlando 1508 "Frey II" -> N108) sits
+  with the plan it became on the Divisions tab, tagged "old #".
 - Community links use `#jde=<number>` on the sibling app. Same origin and
   shared session, so the link lands inside the record.
 - A row is marked unreliable by four independent signals: an impossibly low

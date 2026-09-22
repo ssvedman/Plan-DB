@@ -509,7 +509,13 @@ function planList(){
     if(!e){ e=seed(p); if(!e.name) e.name=r.plan_name||""; by.set(p,e); }
     e.rows.push(r);
     if(r.comm_num) e.comms.add(r.comm_num);
-    const s=num(r.sqft); if(s && (e.sqft==null || s>e.sqft)) e.sqft=s;
+    /* Size comes from the rows that priced the home, not the roster: the
+       roster took the largest figure any workbook ever gave, and one bad block
+       (Cypress Point's rows with no elevation, all at 3,041 sq ft) left Frey,
+       Nash, Springsteen and Santana at double their size. Unreliable rows only
+       count when nothing else priced the plan. */
+    const s=num(r.sqft);
+    if(s>1){ if(r.incomplete){ if(!(e.sqBad>=s)) e.sqBad=s; } else if(!(e.sqGood>=s)) e.sqGood=s; }
     if(!e.beds)  e.beds=r.beds||"";
     if(!e.baths) e.baths=r.baths||"";
     if(!e.sty)   e.sty=r.sty||"";
@@ -517,6 +523,7 @@ function planList(){
   });
   const out=[];
   by.forEach(e=>{
+    if(e.sqGood) e.sqft=e.sqGood; else if(e.sqft==null && e.sqBad) e.sqft=e.sqBad;
     const priced=e.rows.filter(r=>costOf(r)!=null && cpsfOf(r)!=null && !(r.incomplete && !state.showIncomplete));
     const cp=priced.map(cpsfOf), ex=priced.map(costOf);
     e.n=e.rows.length; e.nComm=e.comms.size; e.nPriced=priced.length;
@@ -1337,7 +1344,7 @@ async function loadXdiv(){
   state.xdcc={};
   if(DEMO||!sb){ x.busy=false; return; }
   try{
-    const base="division,plan_no,name,series,tier,sqft";
+    const base="division,plan_no,name,series,tier,sqft,core_alias";
     try{ x.plans=await pagedSelect("pdb_plans", base+",core_family,collection,lineup_sqft", q=>q); }
     catch(e){ x.noFamily=true; x.plans=await pagedSelect("pdb_plans", base, q=>q); }   // lineup columns not added yet
     for(const d of DIVISIONS){
@@ -1363,9 +1370,9 @@ function xdGroups(){
      homes (Meridian is 1,664 sq ft in Orlando and 2,396 in Tampa). So a name
      match only joins when the square footage agrees within 8%, or when one
      side has no size to compare. */
-  const sqOf=new Map();
-  x.rows.forEach(r=>{ const k=r.division+"|"+r.plan_no, v=num(r.sqft); if(v>1 && !(sqOf.get(k)>=v)) sqOf.set(k,v); });
-  const planSq=p=>num(p.lineup_sqft)||sqOf.get(p.division+"|"+p.plan_no)||num(p.sqft)||null;
+  const sqOf=new Map();                 // largest size among the RELIABLE rows
+  x.rows.forEach(r=>{ if(r.incomplete) return; const k=r.division+"|"+r.plan_no, v=num(r.sqft); if(v>1 && !(sqOf.get(k)>=v)) sqOf.set(k,v); });
+  const planSq=p=>sqOf.get(p.division+"|"+p.plan_no)||num(p.lineup_sqft)||num(p.sqft)||null;
   const close=(a,b)=>!a || !b || Math.abs(a-b)/Math.min(a,b) <= 0.08;
   // a family's name part, so an untagged plan can find the family it belongs to
   const famByName=new Map(), famSq=new Map();
@@ -1373,21 +1380,43 @@ function xdGroups(){
     (famByName.get(n)||famByName.set(n,new Set()).get(n)).add(p.core_family);
     const q=planSq(p); if(q) (famSq.get(p.core_family)||famSq.set(p.core_family,[]).get(p.core_family)).push(q); });
   const famRef=f=>{ const v=(famSq.get(f)||[]).slice().sort((a,b)=>a-b); return v.length?v[Math.floor(v.length/2)]:null; };
-  const clusters=new Map();          // name -> [{key, sq}]
+  /* Three passes. Lineup families first. Then old plan numbers: a plan whose
+     core_alias names the number it became (Orlando 1508 "Frey II" -> N108)
+     joins that plan's group, and its name becomes another way into the group,
+     so an unaliased twin (1580 "Frey II") follows it. Then everything else by
+     name, size-checked. */
+  const clusters=new Map();          // name -> [{key, sq, fam}]
+  const keyOf=new Map();             // division|plan -> group key
+  const byDP=new Map(x.plans.map(p=>[p.division+"|"+p.plan_no, p]));
   const g=new Map();
-  x.plans.forEach(p=>{
-    if(p.series==="SHELL") return;
-    if(p.core_family){ addTo("F:"+p.core_family, p.core_family, p, "lineup"); return; }
-    const n=xnorm(p.name); if(!n) return;
+  const nameJoin=(n,key,fam,sq)=>{ const list=clusters.get(n)||clusters.set(n,[]).get(n);
+    if(!list.some(c=>c.key===key)) list.push({ key, fam, sq }); };
+  const place=(p,key,fam,how)=>{ keyOf.set(p.division+"|"+p.plan_no,key); addTo(key,fam,p,how); };
+  const byName=p=>{
+    const n=xnorm(p.name); if(!n) return null;
     const q=planSq(p);
     const hits=[...(famByName.get(n)||[])].filter(f=>close(q, famRef(f)));
-    if(hits.length===1){ addTo("F:"+hits[0], hits[0], p, "name"); return; }
+    if(hits.length===1){ place(p,"F:"+hits[0],hits[0],"name"); return keyOf.get(p.division+"|"+p.plan_no); }
     const list=clusters.get(n)||clusters.set(n,[]).get(n);
     let c=list.find(c=>close(q, c.sq));
-    if(!c){ c={ key:"N:"+n+"#"+list.length, sq:q }; list.push(c); }
+    if(!c){ c={ key:"N:"+n+"#"+list.length, sq:q, fam:null }; list.push(c); }
     else if(!c.sq && q) c.sq=q;
-    addTo(c.key, null, p, "name");
+    place(p,c.key,c.fam,c.fam?"name":"name"); return c.key;
+  };
+  const live=x.plans.filter(p=>p.series!=="SHELL");
+  live.forEach(p=>{ if(p.core_family) place(p,"F:"+p.core_family,p.core_family,"lineup"); });
+  live.forEach(p=>{
+    if(p.core_family || !p.core_alias) return;
+    const t=byDP.get(p.division+"|"+String(p.core_alias).toUpperCase()) || byDP.get(p.division+"|"+p.core_alias);
+    if(!t || t===p || t.series==="SHELL") return;
+    let key=keyOf.get(t.division+"|"+t.plan_no);
+    if(!key) key=byName(t);
+    if(!key) return;
+    const fam=key.startsWith("F:")?key.slice(2):null;
+    place(p,key,fam,"alias");
+    const n=xnorm(p.name); if(n) nameJoin(n,key,fam,planSq(p)||planSq(t));
   });
+  live.forEach(p=>{ if(!keyOf.has(p.division+"|"+p.plan_no)) byName(p); });
   function addTo(key, fam, p, how){
     let e=g.get(key);
     if(!e){ const parts=fam?fam.split("|"):null;
@@ -1396,7 +1425,7 @@ function xdGroups(){
     const c=e.by[p.division]||(e.by[p.division]={ plans:[], names:[], rows:[], sqft:null, how:new Set() });
     c.plans.push(p.plan_no); if(p.name) c.names.push(p.name); c.how.add(how); e.how.add(how);
     c.rows=c.rows.concat(costs.get(p.division+"|"+p.plan_no)||[]);
-    const sq=num(p.sqft)||num(p.lineup_sqft); if(sq && (c.sqft==null || sq>c.sqft)) c.sqft=sq;
+    const sq=planSq(p); if(sq && (c.sqft==null || sq>c.sqft)) c.sqft=sq;
     if(p.series && p.series!=="LEGACY") e.series.set(p.series,(e.series.get(p.series)||0)+1);
     if(p.tier) e.tiers.add(String(p.tier));
   }
@@ -1406,7 +1435,6 @@ function xdGroups(){
       const cp=c.rows.map(cpsfOf), ex=c.rows.map(costOf), pr=c.rows.map(r=>num(r.base_price)).filter(v=>v&&v>0);
       c.cpsf=cp.length?mean(cp):null; c.ext=ex.length?mean(ex):null; c.price=pr.length?mean(pr):null;
       c.nComm=new Set(c.rows.map(r=>r.comm_num).filter(Boolean)).size;
-      c.rows.forEach(r=>{ const s=num(r.sqft); if(s && (c.sqft==null || s>c.sqft)) c.sqft=s; });
     });
     e.series=[...e.series.entries()].sort((a,b)=>b[1]-a[1]).map(z=>z[0])[0]||"";
     e.tiers=[...e.tiers].sort();
@@ -1480,8 +1508,9 @@ function renderDivs(a){
     const cls = sp && c.cpsf!=null ? (c.cpsf===sp.lo?" lo":c.cpsf===sp.hi?" hi":"") : "";
     const nums=c.plans.map(p=>`<span class="mono">${esc(p)}</span>`).join(" ");
     const nameTag=c.how.has("name")&&!c.how.has("lineup")?` <span class="pill off" title="Matched on plan name — the lineup hasn't tagged this plan">name</span>`:"";
-    if(c.cpsf==null) return `<td class="xc">${nums}${nameTag}<span class="rng">${c.sqft?sqftF(c.sqft)+" sf · ":""}awaiting pricing</span></td>`;
-    return `<td class="xc${cls}">${nums}${nameTag} <b>${money2(c.cpsf)}</b>
+    const aliasTag=c.how.has("alias")?` <span class="pill off" title="Older plan number for the same home (roster alias)">old #</span>`:"";
+    if(c.cpsf==null) return `<td class="xc">${nums}${nameTag}${aliasTag}<span class="rng">${c.sqft?sqftF(c.sqft)+" sf · ":""}awaiting pricing</span></td>`;
+    return `<td class="xc${cls}">${nums}${nameTag}${aliasTag} <b>${money2(c.cpsf)}</b>
       <span class="rng">${money(c.ext)} · ${c.sqft?sqftF(c.sqft)+" sf":"—"} · ${c.nComm} comm${c.nComm===1?"":"s"}</span></td>`;
   };
   a.innerHTML=`<div class="panel">
@@ -1663,7 +1692,7 @@ function exportDivs(list, shown){
   head.push("Spread %","Spread $/sq ft","Lowest","Highest");
   const body=list.map(e=>{
     const row=[e.label, e.series?seriesLabel(e.series):"", e.tiers.join("/"),
-      e.how.has("lineup")?(e.how.has("name")?"lineup + name":"lineup"):"name"];
+      ["lineup","alias","name"].filter(h=>e.how.has(h)).map(h=>h==="alias"?"old plan #":h).join(" + ")];
     shown.forEach(d=>{ const c=e.by[d];
       row.push(c?c.plans.join(", "):"", c&&c.sqft||null, c?c.nComm:null, c?c.cpsf:null, c?c.ext:null, c?c.price:null); });
     const sp=xdSpread(e,shown);

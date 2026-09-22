@@ -279,6 +279,8 @@ function paintLineup(){
       tbl(["Division","Plan #","In the database","On the sheet"],R.conflicts.map(c=>[dl(c.division),c.plan_no,c.roster,c.lineup])),true)}
     ${sec("Tier changes",R.tierChanges.length,
       tbl(["Division","Plan #","Plan","Tier now","Tier on the sheet"],R.tierChanges.map(c=>[dl(c.division),c.plan_no,c.name,c.from,c.to])),true)}
+    ${sec("Square footage corrections — the database figure was more than 8% off the sheet",R.sqftFixes.length,
+      tbl(["Division","Plan #","Plan","Sq ft now","Sq ft on the sheet"],R.sqftFixes.map(c=>[dl(c.division),c.plan_no,c.name,Math.round(c.from),c.to])),true)}
     ${sec("Series changes",realSeries.length,
       tbl(["Division","Plan #","Plan","Series now","Series from the sheet"],realSeries.map(c=>[dl(c.division),c.plan_no,c.name,c.from,c.to])),true)}
     ${sec("New plans added to the roster",R.added.length,
