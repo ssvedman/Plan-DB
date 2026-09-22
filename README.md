@@ -13,7 +13,8 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
 | `app.js` | Auth, load, rollup, filters, views, export |
 | `config.js` | Connection settings, series display order |
 | `styles.css` | Shared design language plus this app's components |
-| `load.html` / `load.js` | Importer. Editors drop a month's data files in. |
+| `load.html` / `load.js` | Importer. Editors drop a month's data files in, and the CORE product lineup workbook. |
+| `lineup.js` | Reads the CORE lineup sheet and works out what it changes in the roster. No DOM, so it runs under Node too. |
 | `*.sql` | Backend. Kept local, not published. |
 
 ## Notes
@@ -70,6 +71,28 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
 - That breakdown totals the base home **plus every option**, while a plan's
   headline cost per sq ft is the base alone. The two reconcile against
   `1BASE + options`, not against the headline figure.
+- The Communities tab filters by tier. Tier belongs to the plan, so the filter
+  drops priced rows whose plan is in another tier and rebuilds the index from
+  the rest; a plan's benchmark doesn't change, only which plans count.
+- The Communities export writes the tab as shown. Its JDE column is the full
+  community number — the short JDE with `0000` appended (2631472 → 26314720000).
+- **The CORE product lineup is the cross-division plan mapping.** Plan numbers
+  are division-specific, so the join is the plan's family: collection + name as
+  the lineup prints it (`COTTAGE|KITSON` is L056 in Orlando, L076 in Tampa,
+  2520 as the regional design), stored in `pdb_plans.core_family`. The whole
+  sheet is also kept in `pdb_core_lineup`, one row per line, per sheet date.
+  Load it through `load.html` after running `add_core_lineup.sql` once.
+- Loading a lineup: a versioned plan ("(ORLANDO VERSION)") belongs to the
+  division it names and is added to the roster if missing. A plan with no
+  version line is the regional design and only attaches where a division
+  already carries that number under a name that agrees. A name disagreement is
+  reported and skipped, never overwritten. Tier comes from the sheet; series
+  only replaces a Legacy, inferred or unassigned one; other roster fields are
+  filled only where blank. Rows are upserted whole so no curated column is
+  nulled.
+- The Divisions tab lines each family up across divisions, each at its own
+  newest month (shown, since they can differ). A plan the lineup hasn't tagged
+  joins by name and is marked as a name match.
 - Community links use `#jde=<number>` on the sibling app. Same origin and
   shared session, so the link lands inside the record.
 - A row is marked unreliable by four independent signals: an impossibly low

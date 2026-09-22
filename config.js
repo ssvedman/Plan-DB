@@ -42,6 +42,8 @@ window.PDB_SERIES = {
   "Ascent II": { blurb: "Front-loaded towns." },
   "Embark":    { blurb: "Front-loaded towns." },
   "Venture":   { blurb: "Alley-loaded towns." },
+  "Serenity":  { blurb: "Attached towns (CORE lineup)." },
+  "Breakwater":{ blurb: "Attached towns (CORE lineup)." },
   "Palm":      { blurb: "" },
   "Cottage":   { blurb: "" },
   "Eventide":  { blurb: "" },
@@ -57,7 +59,7 @@ window.PDB_SERIES = {
 };
 /* Display order. Anything not listed sorts to the end alphabetically. */
 window.PDB_SERIES_ORDER = [
-  "Ascent", "Ascent II", "Embark", "Venture", "TBD",
+  "Ascent", "Ascent II", "Embark", "Venture", "Serenity", "Breakwater", "TBD",
   "Palm", "Cottage", "Eventide", "Lonestar", "Coastline",
   "Vineyard", "Majors", "Classic", "Paragon",
   "LEGACY", "SHELL"

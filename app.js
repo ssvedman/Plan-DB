@@ -77,6 +77,9 @@ const state = {
   rng:{},                            // key -> {min,max,lo,hi} live slider state
   open:{},                           // plan_no -> drill-down expanded?
   openComm:{}, openCode:{},          // community / cost-code drill-downs
+  commTier:{},                       // Communities tab tier filter (empty = all)
+  xd:null,                           // Divisions tab data: every division's roster + newest month
+  xdv:{ q:"", hide:{}, scope:"multi", sort:"name", dir:1, tier:{}, series:{} },
   trendSeries:{}, trendTouched:false,// series key -> line shown on the trend chart?
   trendLFL:true                      // chart only homes priced in every month
 };
@@ -291,6 +294,7 @@ async function setDataset(ds){
    view, so it belongs to the page, not to one table. */
 function renderScope(){
   const el=$("scope"); if(!el) return;
+  if(state.view==="divisions"){ el.classList.add("hidden"); el.innerHTML=""; return; }
   const manyDivs=DIVISIONS.length>1, manyMonths=state.datasets.length>1;
   if(!manyDivs && !manyMonths){ el.classList.add("hidden"); el.innerHTML=""; return; }
   el.classList.remove("hidden");
@@ -660,6 +664,8 @@ function render(){
   const tt=$("tTrend"); if(tt) tt.classList.toggle("hidden", state.datasets.length<2);
   renderScope();
   const a=$("viewArea");
+  // spans every division, so one empty division mustn't hide it
+  if(state.view==="divisions") return renderDivs(a);
   if(!state.rows.length && !Object.keys(state.plans).length) return renderEmpty(a);
   if(state.view==="series") return renderSeries(a, all);
   if(state.view==="communities") return renderComms(a);
@@ -726,7 +732,7 @@ function renderPlans(a, all, list){
   $("chkAwait").onchange=e=>{ state.showAwaiting=e.target.checked; render(); };
   $("chkIncomplete").onchange=e=>{ state.showIncomplete=e.target.checked; state.rng={}; render(); };
   $("btnXlsx").onclick=()=>exportPlans(sortPlans(filtered(planList())));
-  $("btnReset").onclick=clearAllFilters;
+  $("btnReset").onclick=()=>clearAllFilters();
   const applyMsel=(bagKey,vals)=>{ const bag={}; vals.forEach(v=>{ bag[v]=true; }); state[bagKey]=bag; render(); };
   bindMsel("dd_series",["series","series"],v=>applyMsel("series",v));
   FACETS.forEach(f=>bindMsel("dd_"+f.key, f.noun, v=>applyMsel(f.key,v)));
@@ -1108,6 +1114,7 @@ function anyFilterOn(){
 function clearAllFilters(quiet){
   state.q=""; state.series={}; state.rng={};
   FACETS.forEach(f=>{ state[f.key]={}; });
+  state.commTier={};
   state.showShells=false; state.showAwaiting=true; state.showIncomplete=false;
   if(!quiet) render();          // the division switch renders once, after loading
 }
@@ -1125,7 +1132,7 @@ function filterNote(total, shownN){
 }
 function wireFilterNote(){
   const b=$("btnClearFilters"); if(!b) return;
-  b.onclick=clearAllFilters;
+  b.onclick=()=>clearAllFilters();
 }
 
 /* ---------------- COMMUNITY COST INDEX ----------------
@@ -1141,8 +1148,19 @@ function wireFilterNote(){
    its own benchmark — so it is left out, and the number of plans that did
    count is shown so a thin index reads as one. */
 const IDX_MIN_PLANS=3;
-function communityIndex(){
-  const usable=state.rows.filter(r=>
+/* Tier belongs to the plan, not the community, so the Communities tab filters
+   the priced rows by their plan's tier and then builds the index from what is
+   left. A plan is either wholly in or wholly out, so each surviving plan's
+   division-wide benchmark is the same as it is unfiltered — the index stays
+   comparable; it just covers fewer plans. */
+function tierOfPlan(plan){ const m=state.plans[plan]; return (m&&m.tier)||"—"; }
+function commRows(){
+  if(!chipsOn(state.commTier)) return state.rows;
+  return state.rows.filter(r=>state.commTier[tierOfPlan(r.plan_no)]);
+}
+function communityIndex(rows){
+  rows=rows||commRows();
+  const usable=rows.filter(r=>
     cpsfOf(r)!=null && !r.incomplete && r.kind!=="shell" && (r.comm_num||r.community));
   // benchmark: mean cost per sq ft for each plan across the communities offering it
   const planComm=new Map();          // plan -> Map(comm -> [cpsf])
@@ -1182,13 +1200,35 @@ function communityIndex(){
     e.index = e.ratios.length>=IDX_MIN_PLANS ? mean(e.ratios)*100 : null;
   });
   // every community that priced anything, including ones with too few shared plans
-  state.rows.forEach(r=>{
+  rows.forEach(r=>{
     const k=r.comm_num||r.community; if(!k||by.has(k)) return;
     by.set(k,{ key:k, num:r.comm_num, jde:r.jde, name:r.community,
-               plans:new Set(state.rows.filter(x=>(x.comm_num||x.community)===k).map(x=>x.plan_no)),
+               plans:new Set(rows.filter(x=>(x.comm_num||x.community)===k).map(x=>x.plan_no)),
                cp:[], ex:[], ratios:[], detail:[], index:null });
   });
+  // the tiers each community builds, from the plans left after filtering
+  by.forEach(e=>{ e.tiers=[...new Set([...e.plans].map(tierOfPlan))].sort(tierCmp); });
   return [...by.values()];
+}
+function tierCmp(a,b){
+  if(a==="—") return 1; if(b==="—") return -1;
+  const na=parseFloat(a), nb=parseFloat(b);
+  if(isFinite(na)&&isFinite(nb)&&na!==nb) return na-nb;
+  return String(a).localeCompare(String(b));
+}
+const tierText = t => t==="—" ? "Unlisted" : "Tier "+t;
+/* JDE's full community number is the short one the source carries with four
+   zeros appended: 2631472 -> 26314720000. */
+function fullJde(j){ const s=String(j==null?"":j).trim(); return s ? s+"0000" : ""; }
+/* Tier dropdown for the Communities tab. Counts are communities, taken from
+   the unfiltered rows so every option says what picking it would show. */
+function commTierDropdown(){
+  const per=new Map();                       // tier -> Set(community)
+  state.rows.forEach(r=>{ const k=r.comm_num||r.community; if(!k) return;
+    const t=tierOfPlan(r.plan_no); (per.get(t)||per.set(t,new Set()).get(t)).add(k); });
+  if(per.size<2 && !chipsOn(state.commTier)) return "";
+  const opts=[...per.keys()].sort(tierCmp).map(t=>({ value:t, label:tierText(t)+"  ("+per.get(t).size+")" }));
+  return mselHTML("dd_commTier",["tier","tiers"],opts,Object.keys(state.commTier));
 }
 function idxClass(v){
   if(v==null) return "";
@@ -1203,25 +1243,41 @@ function renderComms(a){
   const spread=scored.length
     ? `${scored.length} communities indexed · ${(Math.min(...scored.map(c=>c.index))).toFixed(0)}–${(Math.max(...scored.map(c=>c.index))).toFixed(0)}`
     : "not enough shared plans to index";
+  const tierOn=chipsOn(state.commTier);
   a.innerHTML=`<div class="panel">
     <div class="secbar">
       <span class="sectitle">Communities</span>
       <span class="hint">Index compares each community against what the same plans cost division-wide. 100 = par. ${esc(spread)}.</span>
+      <span class="spacer"></span>
+      ${commTierDropdown()}
+      <button class="btn mini ghost" id="btnCommXlsx" ${list.length?"":"disabled"}>&#8681; Export</button>
     </div>
-    <table class="pt ct">
-    <thead><tr><th>Community</th><th>JDE</th><th>Plans</th><th>Avg cost / sq ft</th>
+    ${tierOn?`<div class="filternote" style="margin:10px 14px">
+      <span>Showing <b>${list.length}</b> communit${list.length===1?"y":"ies"} building
+        ${esc(Object.keys(state.commTier).sort(tierCmp).map(tierText).join(", "))} — figures cover those plans only.</span>
+      <button class="btn mini ghost" id="btnCommTierClear">Clear tier</button></div>`:""}
+    ${list.length?`<table class="pt ct">
+    <thead><tr><th>Community</th><th>JDE</th><th>Tier</th><th>Plans</th><th>Avg cost / sq ft</th>
       <th>Avg extended cost</th><th class="c-ix">Cost index</th><th class="c-cis"></th><th class="c-ch"></th></tr></thead>
     <tbody>${list.map(c=>{
       const open=!!state.openComm[c.key];
       return `<tr class="crow${open?" open":""}" data-comm="${esc(c.key)}">
         <td><b>${esc(c.name||"—")}</b></td><td class="mono">${esc(c.jde||"")}</td>
+        <td>${esc(c.tiers.map(t=>t==="—"?"—":t).join(", "))}</td>
         <td>${c.plans.size}</td><td>${c.cp.length?money2(mean(c.cp)):"—"}</td>
         <td>${c.ex.length?money(mean(c.ex)):"—"}</td>
         <td class="c-ix">${indexCellHTML(c)}</td>
         <td class="c-cis">${cisBtnHTML(c.jde, c.name)}</td>
         <td class="c-ch"><span class="chev">${open?"▾":"▸"}</span></td></tr>`
-        + (open?`<tr class="pdet"><td colspan="8">${commDetailHTML(c)}</td></tr>`:"");
-    }).join("")}</tbody></table></div>`;
+        + (open?`<tr class="pdet"><td colspan="9">${commDetailHTML(c)}</td></tr>`:"");
+    }).join("")}</tbody></table>`
+    :`<div class="empty" style="padding:26px;text-align:center">No communities build plans in this tier.</div>`}</div>`;
+  bindMsel("dd_commTier",["tier","tiers"],v=>{ const bag={}; v.forEach(x=>{ bag[x]=true; });
+    state.commTier=bag; state.openComm={}; renderComms(a);
+    // the table rebuilds under the dropdown; reopen it so several tiers can be ticked in a row
+    const b=document.querySelector("#dd_commTier [data-msel-btn]"); if(b) b.click(); });
+  if($("btnCommTierClear")) $("btnCommTierClear").onclick=()=>{ state.commTier={}; renderComms(a); };
+  $("btnCommXlsx").onclick=()=>exportComms(list);
   // the CIS link is a real anchor inside a clickable row — let it navigate
   a.querySelectorAll(".cisbtn").forEach(el=>el.onclick=e=>e.stopPropagation());
   a.querySelectorAll("[data-comm]").forEach(tr=>tr.onclick=()=>{
@@ -1251,6 +1307,234 @@ function commDetailHTML(c){
       <td>${money2(d.here)}</td><td>${money2(d.bench)}</td>
       <td class="${d.ratio>1.03?"dl up":d.ratio<0.97?"dl down":"dl flat"}">${signPct(d.ratio-1)}</td></tr>`).join("")}
     </tbody></table></div>`;
+}
+
+/* ---------------- DIVISIONS, SIDE BY SIDE ----------------
+   The same home carries a different plan number in each division, so the
+   join is the plan's family from the CORE lineup (pdb_plans.core_family,
+   "COTTAGE|KITSON"). A plan the lineup hasn't tagged falls back to its name,
+   and says so — names are national, numbers are not, so a name match is
+   usually right but is shown as a lesser kind of match.
+
+   Each division is read at its own newest month, and those months are shown,
+   because they are not always the same month. */
+const xnorm = s => String(s==null?"":s).toUpperCase().replace(/\([^)]*\)/g," ").replace(/[^A-Z0-9]+/g," ").trim();
+const xtitle = s => String(s||"").toLowerCase().replace(/\b([a-z])/g,c=>c.toUpperCase()).replace(/\bMc([a-z])/g,(m,c)=>"Mc"+c.toUpperCase());
+async function pagedSelect(table, cols, scope){
+  let out=[];
+  for(let from=0;;from+=1000){
+    const { data,error } = await scope(sb.from(table).select(cols)).range(from,from+999);
+    if(error) throw error;
+    out=out.concat(data||[]);
+    if(!data || data.length<1000) break;
+  }
+  return out;
+}
+async function loadXdiv(){
+  const x=state.xd={ busy:true, err:null, plans:[], latest:{}, rows:[], noFamily:false };
+  if(DEMO||!sb){ x.busy=false; return; }
+  try{
+    const base="division,plan_no,name,series,tier,sqft";
+    try{ x.plans=await pagedSelect("pdb_plans", base+",core_family,collection,lineup_sqft", q=>q); }
+    catch(e){ x.noFamily=true; x.plans=await pagedSelect("pdb_plans", base, q=>q); }   // lineup columns not added yet
+    for(const d of DIVISIONS){
+      const { data,error } = await sb.from("pdb_plan_costs").select("dataset")
+        .eq("division",d.key).order("dataset",{ascending:false}).limit(1);
+      if(error) throw error;
+      const ds=data && data[0] && data[0].dataset; if(!ds) continue;
+      x.latest[d.key]=ds;
+      x.rows=x.rows.concat(await pagedSelect("pdb_plan_costs",
+        "division,plan_no,comm_num,sqft,cpsf,cpsf_tax,ext_price,ext_price_tax,base_price,incomplete,kind",
+        q=>q.eq("division",d.key).eq("dataset",ds)));
+    }
+  }catch(e){ console.error(e); x.err=(e&&e.message)||String(e); }
+  x.busy=false;
+}
+function xdGroups(){
+  const x=state.xd; if(!x) return [];
+  const costs=new Map();
+  x.rows.forEach(r=>{ if(r.kind==="shell") return;
+    if(cpsfOf(r)==null || costOf(r)==null || (r.incomplete && !state.showIncomplete)) return;
+    const k=r.division+"|"+r.plan_no; (costs.get(k)||costs.set(k,[]).get(k)).push(r); });
+  // a family's name part, so an untagged plan can find the family it belongs to
+  const famByName=new Map();
+  x.plans.forEach(p=>{ if(!p.core_family) return; const n=p.core_family.split("|")[1]||"";
+    (famByName.get(n)||famByName.set(n,new Set()).get(n)).add(p.core_family); });
+  const g=new Map();
+  x.plans.forEach(p=>{
+    if(p.series==="SHELL") return;
+    let fam=p.core_family||null, how="lineup";
+    if(!fam){
+      const n=xnorm(p.name); if(!n) return;
+      const hits=famByName.get(n);
+      if(hits && hits.size===1){ fam=[...hits][0]; how="name"; }
+      else { fam=null; how="name"; }
+      if(!fam){ const key="N:"+n; addTo(key, null, p, how); return; }
+    }
+    addTo("F:"+fam, fam, p, how);
+  });
+  function addTo(key, fam, p, how){
+    let e=g.get(key);
+    if(!e){ const parts=fam?fam.split("|"):null;
+      e={ key, fam, label: fam ? xtitle(parts[0])+" · "+xtitle(parts[1]) : (p.name||p.plan_no),
+          by:{}, series:new Map(), tiers:new Set(), how:new Set() }; g.set(key,e); }
+    const c=e.by[p.division]||(e.by[p.division]={ plans:[], names:[], rows:[], sqft:null, how:new Set() });
+    c.plans.push(p.plan_no); if(p.name) c.names.push(p.name); c.how.add(how); e.how.add(how);
+    c.rows=c.rows.concat(costs.get(p.division+"|"+p.plan_no)||[]);
+    const sq=num(p.sqft)||num(p.lineup_sqft); if(sq && (c.sqft==null || sq>c.sqft)) c.sqft=sq;
+    if(p.series && p.series!=="LEGACY") e.series.set(p.series,(e.series.get(p.series)||0)+1);
+    if(p.tier) e.tiers.add(String(p.tier));
+  }
+  const out=[];
+  g.forEach(e=>{
+    Object.values(e.by).forEach(c=>{
+      const cp=c.rows.map(cpsfOf), ex=c.rows.map(costOf), pr=c.rows.map(r=>num(r.base_price)).filter(v=>v&&v>0);
+      c.cpsf=cp.length?mean(cp):null; c.ext=ex.length?mean(ex):null; c.price=pr.length?mean(pr):null;
+      c.nComm=new Set(c.rows.map(r=>r.comm_num).filter(Boolean)).size;
+      c.rows.forEach(r=>{ const s=num(r.sqft); if(s && (c.sqft==null || s>c.sqft)) c.sqft=s; });
+    });
+    e.series=[...e.series.entries()].sort((a,b)=>b[1]-a[1]).map(z=>z[0])[0]||"";
+    e.tiers=[...e.tiers].sort();
+    e.nDivs=Object.keys(e.by).length;
+    const priced=Object.entries(e.by).filter(([,c])=>c.cpsf!=null);
+    e.nPriced=priced.length;
+    if(priced.length>=2){
+      const v=priced.map(([,c])=>c.cpsf), lo=Math.min(...v), hi=Math.max(...v);
+      e.spread=lo?(hi-lo)/lo:null; e.spreadD=hi-lo; e.loDiv=priced.find(([,c])=>c.cpsf===lo)[0]; e.hiDiv=priced.find(([,c])=>c.cpsf===hi)[0];
+    } else { e.spread=null; e.spreadD=null; }
+    out.push(e);
+  });
+  return out;
+}
+function xdFiltered(all){
+  const v=state.xdv, q=xnorm(v.q), shown=DIVISIONS.filter(d=>!v.hide[d.key]).map(d=>d.key);
+  return all.filter(e=>{
+    const inShown=shown.filter(d=>e.by[d]);
+    const pricedShown=inShown.filter(d=>e.by[d].cpsf!=null);
+    if(v.scope==="multi" && inShown.length<2) return false;
+    if(v.scope==="priced" && pricedShown.length<2) return false;
+    if(v.scope==="any" && !inShown.length) return false;
+    if(chipsOn(v.tier) && !e.tiers.some(t=>v.tier[t]) && !(v.tier["—"] && !e.tiers.length)) return false;
+    if(chipsOn(v.series) && !v.series[e.series||"—"]) return false;
+    if(q){ const hay=xnorm([e.label,e.series,...Object.values(e.by).flatMap(c=>c.plans.concat(c.names))].join(" "));
+      if(!hay.includes(q) && !hay.replace(/ /g,"").includes(q.replace(/ /g,""))) return false; }
+    return true;
+  });
+}
+/* Spread only over the divisions on screen: hiding one should change it. */
+function xdSpread(e, shown){
+  const v=shown.filter(d=>e.by[d] && e.by[d].cpsf!=null).map(d=>e.by[d].cpsf);
+  if(v.length<2) return null;
+  const lo=Math.min(...v), hi=Math.max(...v);
+  return { pct: lo?(hi-lo)/lo:null, d:hi-lo, lo, hi };
+}
+function xdSort(list, shown){
+  const v=state.xdv, d=v.dir;
+  const key={ name:e=>lc(e.label), spread:e=>{ const s=xdSpread(e,shown); return s?s.pct:null; },
+              series:e=>lc(e.series||"~")+"|"+lc(e.label) }[v.sort] || (e=>lc(e.label));
+  return list.slice().sort((a,b)=>{ const x=key(a), y=key(b);
+    if(x==null && y==null) return 0; if(x==null) return 1; if(y==null) return -1;
+    return typeof x==="string" ? d*x.localeCompare(y) : d*(x-y); });
+}
+function renderDivs(a){
+  if(!state.xd){
+    a.innerHTML=`<div class="panel"><div class="empty" style="padding:30px;text-align:center">Loading every division…</div></div>`;
+    loadXdiv().then(()=>{ if(state.view==="divisions") renderDivs(a); });
+    return;
+  }
+  const x=state.xd, v=state.xdv;
+  if(x.busy){ a.innerHTML=`<div class="panel"><div class="empty" style="padding:30px;text-align:center">Loading every division…</div></div>`; return; }
+  if(x.err){ a.innerHTML=`<div class="panel"><div class="empty" style="padding:30px;text-align:center">Couldn't load the divisions: ${esc(x.err)}
+    <div style="margin-top:10px"><button class="btn mini ghost" id="xdRetry">Try again</button></div></div></div>`;
+    $("xdRetry").onclick=()=>{ state.xd=null; renderDivs(a); }; return; }
+  const all=xdGroups();
+  const shown=DIVISIONS.filter(d=>!v.hide[d.key]).map(d=>d.key);
+  const list=xdSort(xdFiltered(all), shown);
+  const months=DIVISIONS.map(d=>x.latest[d.key]);
+  const mixed=new Set(months.filter(Boolean)).size>1;
+  const tierOpts=(()=>{ const c=new Map(); all.forEach(e=>(e.tiers.length?e.tiers:["—"]).forEach(t=>c.set(t,(c.get(t)||0)+1)));
+    return [...c.keys()].sort(tierCmp).map(t=>({value:t,label:tierText(t)+"  ("+c.get(t)+")"})); })();
+  const serOpts=(()=>{ const c=new Map(); all.forEach(e=>{ const s=e.series||"—"; c.set(s,(c.get(s)||0)+1); });
+    return [...c.keys()].sort((p,q)=>{ const i=SERIES_ORDER.indexOf(p), j=SERIES_ORDER.indexOf(q);
+      return (i<0?99:i)-(j<0?99:j) || String(p).localeCompare(q); })
+      .map(s=>({value:s,label:(s==="—"?"Unassigned":seriesLabel(s))+"  ("+c.get(s)+")"})); })();
+  const sortBtn=(k,l)=>`<button class="sortb${v.sort===k?" on":""}" data-xsort="${k}">${l}${v.sort===k?`<i>${v.dir>0?"▲":"▼"}</i>`:""}</button>`;
+  const cell=(e,d)=>{
+    const c=e.by[d]; if(!c) return `<td class="xc none">—</td>`;
+    const sp=xdSpread(e,shown);
+    const cls = sp && c.cpsf!=null ? (c.cpsf===sp.lo?" lo":c.cpsf===sp.hi?" hi":"") : "";
+    const nums=c.plans.map(p=>`<span class="mono">${esc(p)}</span>`).join(" ");
+    const nameTag=c.how.has("name")&&!c.how.has("lineup")?` <span class="pill off" title="Matched on plan name — the lineup hasn't tagged this plan">name</span>`:"";
+    if(c.cpsf==null) return `<td class="xc">${nums}${nameTag}<span class="rng">${c.sqft?sqftF(c.sqft)+" sf · ":""}awaiting pricing</span></td>`;
+    return `<td class="xc${cls}">${nums}${nameTag} <b>${money2(c.cpsf)}</b>
+      <span class="rng">${money(c.ext)} · ${c.sqft?sqftF(c.sqft)+" sf":"—"} · ${c.nComm} comm${c.nComm===1?"":"s"}</span></td>`;
+  };
+  a.innerHTML=`<div class="panel">
+    <div class="secbar">
+      <span class="sectitle">Divisions side by side</span>
+      <span class="hint">Each plan family across divisions, ${state.basis==="tax"?"with tax":"untaxed"}. Lowest cost per sq ft in green, highest in red.
+        ${x.noFamily?" Families haven't been loaded from a CORE lineup yet, so plans are matched on name only.":""}</span>
+    </div>
+    <div class="bar" style="padding:10px 14px;margin:0">
+      <input type="search" id="xdq" placeholder="Search plan name, number or series…" value="${esc(v.q)}">
+      <select class="scope-sel" id="xdScope">
+        ${[["multi","In 2+ divisions"],["priced","Priced in 2+ divisions"],["any","All plans"]]
+          .map(([k,l])=>`<option value="${k}"${v.scope===k?" selected":""}>${l}</option>`).join("")}</select>
+      ${mselHTML("dd_xdTier",["tier","tiers"],tierOpts,Object.keys(v.tier))}
+      ${mselHTML("dd_xdSeries",["series","series"],serOpts,Object.keys(v.series))}
+      ${DIVISIONS.map(d=>`<label class="hint chk"><input type="checkbox" data-xdiv="${esc(d.key)}" ${v.hide[d.key]?"":"checked"}> ${esc(d.label)}</label>`).join("")}
+      <span class="spacer"></span>
+      <span class="hint" id="xdCount">${list.length} of ${all.length} families</span>
+      <button class="btn mini ghost" id="btnXdXlsx" ${list.length?"":"disabled"}>&#8681; Export</button>
+    </div>
+    ${mixed?`<div class="filternote" style="margin:0 14px 10px"><span>Divisions are at different months:
+      ${DIVISIONS.filter(d=>x.latest[d.key]).map(d=>`${esc(d.label)} ${esc(dsLabel(x.latest[d.key]))}`).join(" · ")}. Each is its newest month loaded.</span></div>`:""}
+    <div class="sortbar" style="padding:0 14px">${sortBtn("name","Plan")}${sortBtn("series","Series")}${sortBtn("spread","Spread")}</div>
+    <div style="overflow-x:auto">
+    <table class="pt xd"><thead><tr><th>Plan</th>
+      ${shown.map(d=>`<th>${esc(divOf(d).label)}<span class="rng">${x.latest[d]?esc(dsShort(x.latest[d])):"no costs loaded"}</span></th>`).join("")}
+      <th class="c-cp">Spread</th></tr></thead>
+    <tbody>${list.length?list.map(e=>{
+      const sp=xdSpread(e,shown);
+      return `<tr><td><b>${esc(e.label)}</b>
+          <span class="rng">${esc([e.series?seriesLabel(e.series):"", e.tiers.length?"tier "+e.tiers.join("/"):""].filter(Boolean).join(" · "))}</span></td>
+        ${shown.map(d=>cell(e,d)).join("")}
+        <td class="c-cp">${sp?`<b>${signPct(sp.pct)}</b><span class="rng">${money2(sp.d)} / sq ft</span>`:`<span class="mute">—</span>`}</td></tr>`;
+    }).join(""):`<tr><td colspan="${shown.length+2}"><div class="empty" style="padding:22px;text-align:center">No plan families match.</div></td></tr>`}</tbody></table></div></div>`;
+  const rerender=()=>renderDivs(a);
+  $("xdq").addEventListener("input",e=>{ v.q=e.target.value; clearTimeout(renderDivs._t);
+    renderDivs._t=setTimeout(()=>{ rerender(); const q=$("xdq"); if(q){ q.focus(); q.setSelectionRange(q.value.length,q.value.length); } },180); });
+  $("xdScope").onchange=e=>{ v.scope=e.target.value; rerender(); };
+  a.querySelectorAll("[data-xdiv]").forEach(cb=>cb.onchange=()=>{ v.hide[cb.dataset.xdiv]=!cb.checked; rerender(); });
+  a.querySelectorAll("[data-xsort]").forEach(b=>b.onclick=()=>{ const k=b.dataset.xsort;
+    if(v.sort===k) v.dir=-v.dir; else { v.sort=k; v.dir = k==="spread" ? -1 : 1; } rerender(); });
+  const bag=vals=>{ const o={}; vals.forEach(z=>{ o[z]=true; }); return o; };
+  bindMsel("dd_xdTier",["tier","tiers"],vals=>{ v.tier=bag(vals); rerender(); const b=document.querySelector("#dd_xdTier [data-msel-btn]"); if(b) b.click(); });
+  bindMsel("dd_xdSeries",["series","series"],vals=>{ v.series=bag(vals); rerender(); const b=document.querySelector("#dd_xdSeries [data-msel-btn]"); if(b) b.click(); });
+  $("btnXdXlsx").onclick=()=>exportDivs(list, shown);
+}
+function exportDivs(list, shown){
+  if(!window.XLSX){ uiAlert("Spreadsheet library didn't load — refresh and try again.","Export"); return; }
+  const basis=state.basis==="tax"?"with tax":"untaxed", x=state.xd;
+  const head=["Plan family","Series","Tier","Matched by"];
+  shown.forEach(d=>{ const L=divOf(d).label+(x.latest[d]?" ("+dsShort(x.latest[d])+")":"");
+    head.push(`${L} plan #`,`${L} sq ft`,`${L} communities`,`${L} cost/sq ft (${basis})`,`${L} extended cost (${basis})`,`${L} sales price`); });
+  head.push("Spread %","Spread $/sq ft","Lowest","Highest");
+  const body=list.map(e=>{
+    const row=[e.label, e.series?seriesLabel(e.series):"", e.tiers.join("/"),
+      e.how.has("lineup")?(e.how.has("name")?"lineup + name":"lineup"):"name"];
+    shown.forEach(d=>{ const c=e.by[d];
+      row.push(c?c.plans.join(", "):"", c&&c.sqft||null, c?c.nComm:null, c?c.cpsf:null, c?c.ext:null, c?c.price:null); });
+    const sp=xdSpread(e,shown);
+    const who=val=>sp?shown.filter(d=>e.by[d]&&e.by[d].cpsf===val).map(d=>divOf(d).label).join(", "):"";
+    row.push(sp?sp.pct:null, sp?sp.d:null, who(sp&&sp.lo), who(sp&&sp.hi));
+    return row;
+  });
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.aoa_to_sheet([head,...body]);
+  ws["!cols"]=head.map((h,i)=>({wch:i===0?28:Math.min(26,Math.max(10,h.length))}));
+  XLSX.utils.book_append_sheet(wb, ws, "Divisions");
+  XLSX.writeFile(wb, `Plan-DB_Divisions_${shown.map(d=>divOf(d).label).join("-")}_${state.basis}_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 
 /* ---------------- LINE CHART ----------------
@@ -1661,17 +1945,55 @@ function rangeSlider(hostId, key, fmt){
   const commit=()=>{ paint(); scheduleRepaint(); };
   lo.addEventListener("input",()=>{ r.touched=true; r.lo=Math.min(+lo.value, r.hi); lo.value=r.lo; commit(); });
   hi.addEventListener("input",()=>{ r.touched=true; r.hi=Math.max(+hi.value, r.lo); hi.value=r.hi; commit(); });
+  /* While dragging, only the list repaints, on an animation frame. That frame
+     can be skipped or throttled (Chrome does so for background and occluded
+     windows), which left a moved thumb with an unfiltered list — and nothing
+     else (tab counts, dropdown counts) ever caught up. On release, do a full
+     render so the filter always lands, then hand focus back to the same thumb
+     so keyboard use isn't interrupted. */
+  const settle=which=>{ rsFocus=hostId+"|"+which; render(); };
+  lo.addEventListener("change",()=>settle("lo"));
+  hi.addEventListener("change",()=>settle("hi"));
+  if(rsFocus===hostId+"|lo"){ rsFocus=null; lo.focus({preventScroll:true}); }
+  else if(rsFocus===hostId+"|hi"){ rsFocus=null; hi.focus({preventScroll:true}); }
   paint();
 }
 /* Dragging fires input continuously; repaint the list on the next frame rather
    than per event, so a 126-row regroup never stutters the thumb. */
-let repaintList=null, rafId=null;
+let repaintList=null, rafId=null, rsFocus=null;
 function scheduleRepaint(){
   if(rafId) return;
   rafId=requestAnimationFrame(()=>{ rafId=null; if(repaintList) repaintList(); });
 }
 
 /* ---------------- export ---------------- */
+/* The Communities tab exactly as shown: same tier filter, same order, same
+   basis. JDE goes out as the full community number (short JDE + "0000"),
+   which is what JDE itself keys on; the short form rides alongside. */
+function exportComms(list){
+  if(!window.XLSX){ uiAlert("Spreadsheet library didn't load — refresh and try again.","Export"); return; }
+  const basis=state.basis==="tax"?"with tax":"untaxed";
+  const head=["Community","JDE","Tier","Plans priced","Plans compared",
+              `Avg cost/sq ft (${basis})`,`Avg extended cost (${basis})`,"Cost index (100 = par)","Difference"];
+  const body=list.map(c=>{
+    const j=fullJde(c.jde);
+    return [c.name||"", /^\d+$/.test(j)?+j:j,
+      c.tiers.map(t=>t==="—"?"Unlisted":t).join(", "),
+      c.plans.size, c.ratios.length,
+      c.cp.length?mean(c.cp):null, c.ex.length?mean(c.ex):null,
+      c.index, c.index!=null?(c.index-100)/100:null];
+  });
+  const ws=XLSX.utils.aoa_to_sheet([head,...body]);
+  // an 11-digit number would otherwise show in scientific notation in some viewers
+  for(let r=1;r<=body.length;r++){ const cell=ws[XLSX.utils.encode_cell({r,c:1})];
+    if(cell && cell.t==="n") cell.z="0"; }
+  ws["!cols"]=[{wch:34},{wch:14},{wch:10},{wch:12},{wch:14},{wch:20},{wch:24},{wch:20},{wch:12}];
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Communities");
+  const tiers=chipsOn(state.commTier)
+    ? "_tier-"+Object.keys(state.commTier).sort(tierCmp).map(t=>t==="—"?"unlisted":t).join("-") : "";
+  XLSX.writeFile(wb, `Plan-DB_Communities_${divOf(state.division).label}_${state.dataset||"export"}${tiers}_${state.basis}_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
 function exportPlans(list){
   if(!window.XLSX){ uiAlert("Spreadsheet library didn't load — refresh and try again.","Export"); return; }
   const basis=state.basis==="tax"?"with tax":"untaxed";
@@ -1707,7 +2029,7 @@ function exportPlans(list){
       .map(o=>[o.plan_no,o.community,o.elev,o.opt_code,o.opt_name,num(o.amount)]);
     if(od.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([oh,...od]), "Options");
   }
-  const ci=communityIndex().filter(c=>c.index!=null).sort((a,b)=>b.index-a.index);
+  const ci=communityIndex(state.rows).filter(c=>c.index!=null).sort((a,b)=>b.index-a.index);
   if(ci.length){
     const ih=["Community","JDE","Plans priced","Plans compared","Avg cost/sq ft","Cost index (100 = par)","Difference"];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([ih,
