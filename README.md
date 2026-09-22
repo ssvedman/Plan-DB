@@ -92,7 +92,16 @@ Sign-in required; viewer access is enough to read, editors and admins can write.
   nulled.
 - The Divisions tab lines each family up across divisions, each at its own
   newest month (shown, since they can differ). A plan the lineup hasn't tagged
-  joins by name and is marked as a name match.
+  joins by name and is marked as a name match — but only when its square
+  footage agrees within 8%, because legacy plans reuse names for different
+  homes (Meridian is 1,664 sq ft in Orlando and 2,396 in Tampa).
+- Clicking a family on the Divisions tab opens a cost-code comparison, fetched
+  on demand from `pdb_cost_codes` for each division's newest month. Only the
+  homes behind the row's headline figure count (unreliable rows stay out unless
+  shown), and each code is averaged over every home in the division with a
+  missing code as zero, so a division's codes add up to its average home and a
+  code only one division pays shows as a real difference. Untaxed only — the
+  cost-code maps carry no tax.
 - Community links use `#jde=<number>` on the sibling app. Same origin and
   shared session, so the link lands inside the record.
 - A row is marked unreliable by four independent signals: an impossibly low

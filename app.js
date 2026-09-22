@@ -80,6 +80,8 @@ const state = {
   commTier:{},                       // Communities tab tier filter (empty = all)
   xd:null,                           // Divisions tab data: every division's roster + newest month
   xdv:{ q:"", hide:{}, scope:"multi", sort:"name", dir:1, tier:{}, series:{} },
+  xdOpen:{}, xdAll:{},               // Divisions tab: expanded families, "show every code"
+  xdcc:{},                           // division|plans -> cost-code homes, fetched on demand
   trendSeries:{}, trendTouched:false,// series key -> line shown on the trend chart?
   trendLFL:true                      // chart only homes priced in every month
 };
@@ -1332,6 +1334,7 @@ async function pagedSelect(table, cols, scope){
 }
 async function loadXdiv(){
   const x=state.xd={ busy:true, err:null, plans:[], latest:{}, rows:[], noFamily:false };
+  state.xdcc={};
   if(DEMO||!sb){ x.busy=false; return; }
   try{
     const base="division,plan_no,name,series,tier,sqft";
@@ -1344,7 +1347,7 @@ async function loadXdiv(){
       const ds=data && data[0] && data[0].dataset; if(!ds) continue;
       x.latest[d.key]=ds;
       x.rows=x.rows.concat(await pagedSelect("pdb_plan_costs",
-        "division,plan_no,comm_num,sqft,cpsf,cpsf_tax,ext_price,ext_price_tax,base_price,incomplete,kind",
+        "division,plan_no,comm_num,elev,sqft,cpsf,cpsf_tax,ext_price,ext_price_tax,base_price,incomplete,kind",
         q=>q.eq("division",d.key).eq("dataset",ds)));
     }
   }catch(e){ console.error(e); x.err=(e&&e.message)||String(e); }
@@ -1356,22 +1359,34 @@ function xdGroups(){
   x.rows.forEach(r=>{ if(r.kind==="shell") return;
     if(cpsfOf(r)==null || costOf(r)==null || (r.incomplete && !state.showIncomplete)) return;
     const k=r.division+"|"+r.plan_no; (costs.get(k)||costs.set(k,[]).get(k)).push(r); });
+  /* A name alone is weak evidence: legacy plans reuse names for different
+     homes (Meridian is 1,664 sq ft in Orlando and 2,396 in Tampa). So a name
+     match only joins when the square footage agrees within 8%, or when one
+     side has no size to compare. */
+  const sqOf=new Map();
+  x.rows.forEach(r=>{ const k=r.division+"|"+r.plan_no, v=num(r.sqft); if(v>1 && !(sqOf.get(k)>=v)) sqOf.set(k,v); });
+  const planSq=p=>num(p.lineup_sqft)||sqOf.get(p.division+"|"+p.plan_no)||num(p.sqft)||null;
+  const close=(a,b)=>!a || !b || Math.abs(a-b)/Math.min(a,b) <= 0.08;
   // a family's name part, so an untagged plan can find the family it belongs to
-  const famByName=new Map();
+  const famByName=new Map(), famSq=new Map();
   x.plans.forEach(p=>{ if(!p.core_family) return; const n=p.core_family.split("|")[1]||"";
-    (famByName.get(n)||famByName.set(n,new Set()).get(n)).add(p.core_family); });
+    (famByName.get(n)||famByName.set(n,new Set()).get(n)).add(p.core_family);
+    const q=planSq(p); if(q) (famSq.get(p.core_family)||famSq.set(p.core_family,[]).get(p.core_family)).push(q); });
+  const famRef=f=>{ const v=(famSq.get(f)||[]).slice().sort((a,b)=>a-b); return v.length?v[Math.floor(v.length/2)]:null; };
+  const clusters=new Map();          // name -> [{key, sq}]
   const g=new Map();
   x.plans.forEach(p=>{
     if(p.series==="SHELL") return;
-    let fam=p.core_family||null, how="lineup";
-    if(!fam){
-      const n=xnorm(p.name); if(!n) return;
-      const hits=famByName.get(n);
-      if(hits && hits.size===1){ fam=[...hits][0]; how="name"; }
-      else { fam=null; how="name"; }
-      if(!fam){ const key="N:"+n; addTo(key, null, p, how); return; }
-    }
-    addTo("F:"+fam, fam, p, how);
+    if(p.core_family){ addTo("F:"+p.core_family, p.core_family, p, "lineup"); return; }
+    const n=xnorm(p.name); if(!n) return;
+    const q=planSq(p);
+    const hits=[...(famByName.get(n)||[])].filter(f=>close(q, famRef(f)));
+    if(hits.length===1){ addTo("F:"+hits[0], hits[0], p, "name"); return; }
+    const list=clusters.get(n)||clusters.set(n,[]).get(n);
+    let c=list.find(c=>close(q, c.sq));
+    if(!c){ c={ key:"N:"+n+"#"+list.length, sq:q }; list.push(c); }
+    else if(!c.sq && q) c.sq=q;
+    addTo(c.key, null, p, "name");
   });
   function addTo(key, fam, p, how){
     let e=g.get(key);
@@ -1491,16 +1506,18 @@ function renderDivs(a){
       ${DIVISIONS.filter(d=>x.latest[d.key]).map(d=>`${esc(d.label)} ${esc(dsLabel(x.latest[d.key]))}`).join(" · ")}. Each is its newest month loaded.</span></div>`:""}
     <div class="sortbar" style="padding:0 14px">${sortBtn("name","Plan")}${sortBtn("series","Series")}${sortBtn("spread","Spread")}</div>
     <div style="overflow-x:auto">
-    <table class="pt xd"><thead><tr><th>Plan</th>
+    <table class="pt ct xd"><thead><tr><th>Plan</th>
       ${shown.map(d=>`<th>${esc(divOf(d).label)}<span class="rng">${x.latest[d]?esc(dsShort(x.latest[d])):"no costs loaded"}</span></th>`).join("")}
-      <th class="c-cp">Spread</th></tr></thead>
+      <th class="c-cp">Spread</th><th class="c-ch"></th></tr></thead>
     <tbody>${list.length?list.map(e=>{
-      const sp=xdSpread(e,shown);
-      return `<tr><td><b>${esc(e.label)}</b>
+      const sp=xdSpread(e,shown), open=!!state.xdOpen[e.key];
+      return `<tr class="crow${open?" open":""}" data-xk="${esc(e.key)}" title="Click to compare cost codes"><td><b>${esc(e.label)}</b>
           <span class="rng">${esc([e.series?seriesLabel(e.series):"", e.tiers.length?"tier "+e.tiers.join("/"):""].filter(Boolean).join(" · "))}</span></td>
         ${shown.map(d=>cell(e,d)).join("")}
-        <td class="c-cp">${sp?`<b>${signPct(sp.pct)}</b><span class="rng">${money2(sp.d)} / sq ft</span>`:`<span class="mute">—</span>`}</td></tr>`;
-    }).join(""):`<tr><td colspan="${shown.length+2}"><div class="empty" style="padding:22px;text-align:center">No plan families match.</div></td></tr>`}</tbody></table></div></div>`;
+        <td class="c-cp">${sp?`<b>${signPct(sp.pct)}</b><span class="rng">${money2(sp.d)} / sq ft</span>`:`<span class="mute">—</span>`}</td>
+        <td class="c-ch"><span class="chev">${open?"▾":"▸"}</span></td></tr>`
+        + (open?`<tr class="pdet"><td colspan="${shown.length+3}">${xdCodesHTML(e, shown)}</td></tr>`:"");
+    }).join(""):`<tr><td colspan="${shown.length+3}"><div class="empty" style="padding:22px;text-align:center">No plan families match.</div></td></tr>`}</tbody></table></div></div>`;
   const rerender=()=>renderDivs(a);
   $("xdq").addEventListener("input",e=>{ v.q=e.target.value; clearTimeout(renderDivs._t);
     renderDivs._t=setTimeout(()=>{ rerender(); const q=$("xdq"); if(q){ q.focus(); q.setSelectionRange(q.value.length,q.value.length); } },180); });
@@ -1512,6 +1529,130 @@ function renderDivs(a){
   bindMsel("dd_xdTier",["tier","tiers"],vals=>{ v.tier=bag(vals); rerender(); const b=document.querySelector("#dd_xdTier [data-msel-btn]"); if(b) b.click(); });
   bindMsel("dd_xdSeries",["series","series"],vals=>{ v.series=bag(vals); rerender(); const b=document.querySelector("#dd_xdSeries [data-msel-btn]"); if(b) b.click(); });
   $("btnXdXlsx").onclick=()=>exportDivs(list, shown);
+  const byKey=new Map(list.map(e=>[e.key,e]));
+  a.querySelectorAll("[data-xk]").forEach(tr=>tr.onclick=()=>{
+    const k=tr.dataset.xk; state.xdOpen[k]=!state.xdOpen[k];
+    if(state.xdOpen[k]) loadXdCodes(byKey.get(k)).then(()=>{ if(state.view==="divisions") renderDivs(a); });
+    renderDivs(a); });
+  a.querySelectorAll("[data-xdall]").forEach(b=>b.onclick=ev=>{ ev.stopPropagation();
+    const k=b.dataset.xdall; state.xdAll[k]=!state.xdAll[k]; renderDivs(a); });
+  a.querySelectorAll(".pdet").forEach(tr=>tr.onclick=ev=>ev.stopPropagation());
+  a.querySelectorAll("[data-xdxl]").forEach(b=>b.onclick=ev=>{ ev.stopPropagation();
+    const e=byKey.get(b.dataset.xdxl); if(e) exportXdCodes(e, shown); });
+}
+/* ---- cost codes, division against division ----
+   Fetched when a family is opened, one query per division, and cached per
+   division + plan numbers. Only the homes behind the headline figure count:
+   a cost-code map whose community/plan/elevation row was flagged unreliable is
+   dropped unless unreliable figures are switched on, so the breakdown
+   describes the same homes as the numbers in the row above it.
+
+   Each code is averaged over EVERY home in the division, with a home that
+   doesn't carry the code counting as zero. That way a division's codes add up
+   to its average home, and a code only one division pays for shows up as the
+   difference it really is instead of vanishing from the comparison. */
+function xdccKey(d, c){ return d+"|"+c.plans.slice().sort().join(","); }
+async function loadXdCodes(e){
+  if(!e || DEMO || !sb) return;
+  const x=state.xd, jobs=[];
+  Object.entries(e.by).forEach(([d,c])=>{
+    const ds=x.latest[d]; if(!ds || c.cpsf==null) return;    // nothing priced, nothing to break down
+    const k=xdccKey(d,c); if(state.xdcc[k] && !state.xdcc[k].err) return;
+    state.xdcc[k]={ busy:true, err:null, homes:[] };
+    jobs.push((async()=>{
+      try{
+        const rows=await pagedSelect("pdb_cost_codes","comm_num,plan_no,elev,codes",
+          q=>q.eq("division",d).eq("dataset",ds).in("plan_no",c.plans));
+        state.xdcc[k]={ busy:false, err:null, homes:rows };
+      }catch(err){ console.error(err); state.xdcc[k]={ busy:false, err:(err&&err.message)||String(err), homes:[] }; }
+    })());
+  });
+  jobs.push(loadCodeNames());
+  await Promise.all(jobs);
+}
+/* per division: { n, comms, codes: Map(code -> avg $/sq ft), total } or a status */
+function xdBreakdown(e, d){
+  const c=e.by[d]; if(!c) return null;
+  if(c.cpsf==null || !state.xd.latest[d]) return { status:"none" };
+  const k=xdccKey(d,c), got=state.xdcc[k];
+  if(!got && (DEMO||!sb)) return { status:"none" };
+  if(!got) return { status:"idle" };
+  if(got.busy) return { status:"busy" };
+  if(got.err) return { status:"err", err:got.err };
+  const usable=new Set(c.rows.map(r=>(r.comm_num||"")+"|"+r.plan_no+"|"+(r.elev||"")));
+  const homes=got.homes.filter(h=>usable.has((h.comm_num||"")+"|"+h.plan_no+"|"+(h.elev||"")));
+  const sums=new Map();
+  homes.forEach(h=>{ const m=h.codes||{}; Object.keys(m).forEach(code=>{ const v=num(m[code]); if(v!=null) sums.set(code,(sums.get(code)||0)+v); }); });
+  const codes=new Map(); let total=0;
+  sums.forEach((v,code)=>{ const a=homes.length?v/homes.length:0; codes.set(code,a); total+=a; });
+  return { status:"ok", n:homes.length, comms:new Set(homes.map(h=>h.comm_num).filter(Boolean)).size, codes, total };
+}
+function xdCodeTable(e, shown){
+  const B={}; shown.forEach(d=>{ const b=xdBreakdown(e,d); if(b) B[d]=b; });
+  const divs=shown.filter(d=>B[d] && B[d].status==="ok" && B[d].n>0);
+  const all=new Set(); divs.forEach(d=>B[d].codes.forEach((v,code)=>all.add(code)));
+  const rows=[...all].map(code=>{
+    const vals=divs.map(d=>B[d].codes.get(code)||0);
+    const lo=Math.min(...vals), hi=Math.max(...vals);
+    return { code, desc:(state.ccNames||{})[code]||"", vals, lo, hi, range:hi-lo,
+             hiDiv:divs[vals.indexOf(hi)], loDiv:divs[vals.indexOf(lo)] };
+  }).sort((p,q)=>q.range-p.range || String(p.code).localeCompare(q.code));
+  return { B, divs, rows };
+}
+function xdCodesHTML(e, shown){
+  const { B, divs, rows }=xdCodeTable(e, shown);
+  const inRow=shown.filter(d=>e.by[d]);
+  if(inRow.some(d=>B[d] && (B[d].status==="busy" || B[d].status==="idle")))
+    return `<div class="det"><div class="hint" style="padding:12px 0">Loading cost codes for ${esc(inRow.map(d=>divOf(d).label).join(", "))}…</div></div>`;
+  const errs=inRow.filter(d=>B[d] && B[d].status==="err");
+  const missing=inRow.filter(d=>!divs.includes(d));
+  const why=d=>{ const c=e.by[d], b=B[d];
+    if(b && b.status==="err") return `${divOf(d).label}: couldn't load (${b.err})`;
+    if(!state.xd.latest[d]) return `${divOf(d).label}: no costs loaded`;
+    if(c.cpsf==null) return `${divOf(d).label}: not priced yet`;
+    return `${divOf(d).label}: no cost-code detail for ${c.plans.join(", ")} in ${dsLabel(state.xd.latest[d])}`; };
+  const note=missing.length?`<div class="hint" style="padding:6px 0">${missing.map(d=>esc(why(d))).join(" · ")}</div>`:"";
+  if(divs.length<2) return `<div class="det"><div class="empty" style="padding:14px">Needs cost-code detail in at least two divisions to compare.</div>${note}</div>`;
+  const showAll=!!state.xdAll[e.key], LIMIT=25;
+  const vis=showAll?rows:rows.filter(r=>r.range>0.0049).slice(0,LIMIT);
+  const hiTot=Math.max(...divs.map(d=>B[d].total)), loTot=Math.min(...divs.map(d=>B[d].total));
+  const gap=hiTot-loTot;
+  const cellv=(v,r)=>{ const cls=r.range>0.0049?(v===r.hi?" hi":v===r.lo?" lo":""):"";
+    return `<td class="xcv${cls}">${v?money2(v):`<span class="mute">—</span>`}</td>`; };
+  return `<div class="det"><div class="detsec-h">Cost codes by division
+      <span class="hint">cost per sq ft, untaxed · covers base plus any options priced in, so a total can run above the untaxed headline ·
+        averaged over ${divs.map(d=>`${B[d].n} home${B[d].n===1?"":"s"} in ${esc(divOf(d).label)}`).join(", ")} ·
+        largest differences first</span></div>
+    <table class="dt xdcc"><thead><tr><th>Code</th><th>Description</th>
+      ${divs.map(d=>`<th>${esc(divOf(d).label)}</th>`).join("")}<th>Difference</th><th>Share of gap</th></tr></thead>
+    <tbody>${vis.map(r=>{
+      const share=gap>0? r.range/gap : 0;
+      return `<tr><td class="mono">${esc(r.code)}</td><td>${esc(r.desc||"—")}</td>
+        ${r.vals.map(v=>cellv(v,r)).join("")}
+        <td>${r.range>0.0049?`<b>${money2(r.range)}</b><span class="rng">${esc(divOf(r.hiDiv).label)} higher</span>`:`<span class="mute">same</span>`}</td>
+        <td class="ccbar">${r.range>0.0049&&gap>0?`<span style="width:${Math.min(100,share*100).toFixed(1)}%"></span><i>${pctF(share)}</i>`:""}</td></tr>`;
+    }).join("")}
+    <tr class="xdtot"><td></td><td><b>Total</b></td>
+      ${divs.map(d=>`<td><b>${money2(B[d].total)}</b></td>`).join("")}
+      <td><b>${money2(gap)}</b></td><td></td></tr></tbody></table>
+    <div class="xdcc-f">
+      ${rows.length>vis.length||showAll?`<button class="btn mini ghost" data-xdall="${esc(e.key)}">${showAll?"Show the largest differences only":`Show all ${rows.length} cost codes`}</button>`:""}
+      <button class="btn mini ghost" data-xdxl="${esc(e.key)}">&#8681; Export cost codes</button>
+      <span class="hint">Share of gap is each code's difference against the gap between the dearest and cheapest division's totals; with three divisions they needn't add to 100%.</span>
+    </div>${note}</div>`;
+}
+function exportXdCodes(e, shown){
+  if(!window.XLSX){ uiAlert("Spreadsheet library didn't load — refresh and try again.","Export"); return; }
+  const { B, divs, rows }=xdCodeTable(e, shown);
+  if(divs.length<2) return;
+  const head=["Code","Description",...divs.map(d=>`${divOf(d).label} $/sq ft (${dsShort(state.xd.latest[d])}, ${B[d].n} homes)`),
+              "Difference $/sq ft","Highest","Lowest"];
+  const body=rows.map(r=>[r.code,r.desc,...r.vals,r.range,r.range>0.0049?divOf(r.hiDiv).label:"",r.range>0.0049?divOf(r.loDiv).label:""]);
+  body.push(["","Total",...divs.map(d=>B[d].total),Math.max(...divs.map(d=>B[d].total))-Math.min(...divs.map(d=>B[d].total)),"",""]);
+  const ws=XLSX.utils.aoa_to_sheet([head,...body]);
+  ws["!cols"]=[{wch:10},{wch:40},...divs.map(()=>({wch:22})),{wch:18},{wch:12},{wch:12}];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, "Cost codes");
+  XLSX.writeFile(wb, `Plan-DB_Divisions_${e.label.replace(/[^A-Za-z0-9]+/g,"-")}_cost-codes_${new Date().toISOString().slice(0,10)}.xlsx`);
 }
 function exportDivs(list, shown){
   if(!window.XLSX){ uiAlert("Spreadsheet library didn't load — refresh and try again.","Export"); return; }
